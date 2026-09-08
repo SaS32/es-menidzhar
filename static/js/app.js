@@ -89,5 +89,6 @@ function cycleZoom() {
 applyZoom(parseFloat(localStorage.getItem("zoom") || "1"));
 
 // ── Boot ──────────────────────────────────────────────────────
-document.getElementById("appVersion").textContent = `v${APP_VERSION} · Flask`;
+// The version in the sidebar is rendered by index.html from core.__version__
+// — the single source of truth. Do not set it here.
 switchPage("dashboard");

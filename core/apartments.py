@@ -1,4 +1,5 @@
 from .database import get_connection, audit
+from datetime import datetime
 
 
 # ── Apartments ──────────────────────────────────────────────
@@ -74,6 +75,7 @@ def update_apartment(apt_id, number, floor, area_m2, ideal_parts, has_dog, notes
     )
     audit("apartments", apt_id, "UPDATE",
           old_value=dict(old), new_value=f"number={number},floor={floor}", conn=conn)
+    _invalidate_verification(conn, apt_id, "апартамент")
     conn.commit()
     conn.close()
 
@@ -88,6 +90,60 @@ def delete_apartment(apt_id):
     audit("apartments", apt_id, "DELETE", old_value=dict(old), conn=conn)
     conn.commit()
     conn.close()
+
+
+
+# ── Data verification mark ───────────────────────────────────
+#
+# apartments.verified_at holds the moment someone confirmed that the recorded
+# apartment, owner and resident data matches reality. NULL means "never
+# checked" — the honest default for every apartment that predates this column.
+#
+# The mark is deliberately fragile: any later edit to the apartment, its owner
+# or its residents clears it, because a tick that survives an edit would be
+# claiming something nobody actually verified. Re-confirming is one click.
+
+def set_apartment_verified(apt_id, verified=True, by="admin"):
+    """Set or clear the verification mark. Returns the updated row, or None."""
+    conn = get_connection()
+    if conn.execute("SELECT 1 FROM apartments WHERE id=?", (apt_id,)).fetchone() is None:
+        conn.close()
+        return None
+
+    if verified:
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+        conn.execute("UPDATE apartments SET verified_at=?, verified_by=? WHERE id=?",
+                     (stamp, by, apt_id))
+        audit("apartments", apt_id, "VERIFY", new_value=f"verified_at={stamp},by={by}",
+              changed_by=by, conn=conn)
+    else:
+        conn.execute("UPDATE apartments SET verified_at=NULL, verified_by=NULL WHERE id=?",
+                     (apt_id,))
+        audit("apartments", apt_id, "UNVERIFY", new_value="verified_at=NULL",
+              changed_by=by, conn=conn)
+    conn.commit()
+    row = conn.execute("SELECT * FROM apartments WHERE id=?", (apt_id,)).fetchone()
+    conn.close()
+    return row
+
+
+def _invalidate_verification(conn, apt_id, reason):
+    """Drop the mark because the verified data just changed.
+
+    Called from every write that touches apartment/owner/resident data. Takes
+    the caller's open connection so it lands in the same transaction — the mark
+    must never survive a change that did go through.
+    """
+    if apt_id is None:
+        return
+    row = conn.execute("SELECT verified_at FROM apartments WHERE id=?", (apt_id,)).fetchone()
+    if row is None or row["verified_at"] is None:
+        return   # nothing to invalidate
+    conn.execute("UPDATE apartments SET verified_at=NULL, verified_by=NULL WHERE id=?",
+                 (apt_id,))
+    audit("apartments", apt_id, "UNVERIFY",
+          old_value=f"verified_at={row['verified_at']}",
+          new_value=f"промяна в данните: {reason}", conn=conn)
 
 
 # ── Owners ───────────────────────────────────────────────────
@@ -109,6 +165,7 @@ def save_owner(apt_id, full_name, egn, phone, email, address, notes):
         )
         audit("owners", existing["id"], "UPDATE",
               old_value=dict(existing), new_value=f"name={full_name}", conn=conn)
+        _invalidate_verification(conn, apt_id, "собственик")
     else:
         cur = conn.execute(
             "INSERT INTO owners (apt_id, full_name, egn, phone, email, address, notes) VALUES (?,?,?,?,?,?,?)",
@@ -116,6 +173,7 @@ def save_owner(apt_id, full_name, egn, phone, email, address, notes):
         )
         audit("owners", cur.lastrowid, "CREATE",
               new_value=f"apt_id={apt_id},name={full_name}", conn=conn)
+        _invalidate_verification(conn, apt_id, "собственик")
     conn.commit()
     conn.close()
 
@@ -139,6 +197,7 @@ def add_resident(apt_id, full_name, egn, phone, email, role):
     )
     rid = cur.lastrowid
     audit("residents", rid, "CREATE", new_value=f"apt_id={apt_id},name={full_name}", conn=conn)
+    _invalidate_verification(conn, apt_id, "нов живущ")
     conn.commit()
     conn.close()
     return rid
@@ -153,6 +212,7 @@ def update_resident(rid, full_name, egn, phone, email, role, active):
         (full_name, egn, phone, email, role, int(active), rid)
     )
     audit("residents", rid, "UPDATE", old_value=dict(old), new_value=f"name={full_name}", conn=conn)
+    _invalidate_verification(conn, old["apt_id"] if old else None, "живущ")
     conn.commit()
     conn.close()
 
@@ -162,6 +222,7 @@ def delete_resident(rid):
     old = conn.execute("SELECT * FROM residents WHERE id=?", (rid,)).fetchone()
     conn.execute("DELETE FROM residents WHERE id=?", (rid,))
     audit("residents", rid, "DELETE", old_value=dict(old), conn=conn)
+    _invalidate_verification(conn, old["apt_id"] if old else None, "изтрит живущ")
     conn.commit()
     conn.close()
 

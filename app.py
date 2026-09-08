@@ -1,9 +1,11 @@
 import os, re, sys, json, webbrowser, threading
 from datetime import datetime
 from flask import Flask, render_template, request, jsonify, send_file, abort
+from werkzeug.exceptions import HTTPException
 
-sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from core.database import init_db, get_connection, backup_db
+from core.paths import RESOURCE_DIR, data
 import core
 from reports.pdf_generator import generate_monthly_report, generate_residents_report
 
@@ -12,18 +14,124 @@ from reports.pdf_generator import generate_monthly_report, generate_residents_re
 backup_db()
 init_db()
 
-app = Flask(__name__)
-app.secret_key = os.urandom(24).hex()
+# templates/ and static/ are bundled resources — under a PyInstaller build they
+# live in the unpack folder, not next to the executable.
+app = Flask(
+    __name__,
+    template_folder=os.path.join(RESOURCE_DIR, "templates"),
+    static_folder=os.path.join(RESOURCE_DIR, "static"),
+)
 
 PERIOD_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 
-REPORTS_DIR = os.path.join(os.path.dirname(__file__), "reports", "generated")
+# Generated PDFs are user data — they go next to the database, not into the
+# read-only bundle.
+REPORTS_DIR = data("reports", "generated")
 os.makedirs(REPORTS_DIR, exist_ok=True)
+
+
+# ── Request body helpers ──────────────────────────────────────
+# Every POST/PUT reads its body through these. A missing or malformed field
+# must come back as a readable 400 that the UI can show in a toast — never as
+# a KeyError that surfaces as an HTML 500 page.
+
+class BadRequest(Exception):
+    def __init__(self, message):
+        super().__init__(message)
+        self.message = message
+
+
+def body():
+    """The JSON request body as a dict. 400 if it is missing or not an object."""
+    d = request.get_json(silent=True)
+    if not isinstance(d, dict):
+        raise BadRequest("Липсва или е невалидно JSON тяло на заявката")
+    return d
+
+
+def _label(key, label):
+    return label or key
+
+
+def req_text(d, key, label=None):
+    """Required non-empty text field."""
+    v = d.get(key)
+    v = "" if v is None else str(v).strip()
+    if not v:
+        raise BadRequest(f"Полето „{_label(key, label)}“ е задължително")
+    return v
+
+
+def _to_num(value, key, label):
+    try:
+        return float(str(value).replace(",", "."))
+    except (TypeError, ValueError):
+        raise BadRequest(f"Полето „{_label(key, label)}“ трябва да е число")
+
+
+def req_num(d, key, label=None):
+    """Required numeric field."""
+    v = d.get(key)
+    if v is None or v == "":
+        raise BadRequest(f"Полето „{_label(key, label)}“ е задължително")
+    return _to_num(v, key, label)
+
+
+def req_int(d, key, label=None):
+    return int(req_num(d, key, label))
+
+
+def opt_num(d, key, default=None, label=None):
+    """Optional numeric field — empty stays `default` instead of crashing."""
+    v = d.get(key)
+    if v is None or v == "":
+        return default
+    return _to_num(v, key, label)
+
+
+def opt_int(d, key, default=None, label=None):
+    v = opt_num(d, key, None, label)
+    return default if v is None else int(v)
+
+
+def opt_text(d, key, default=""):
+    v = d.get(key)
+    return default if v is None else str(v)
+
+
+def one_of(d, key, allowed, label=None, required=True, default=None):
+    """Value restricted to a fixed set — keeps bad values out of CHECK columns."""
+    v = d.get(key)
+    if v is None or v == "":
+        if required:
+            raise BadRequest(f"Полето „{_label(key, label)}“ е задължително")
+        return default
+    v = str(v)
+    if v not in allowed:
+        raise BadRequest(
+            f"Полето „{_label(key, label)}“ трябва да е едно от: {', '.join(allowed)}"
+        )
+    return v
+
+
+@app.errorhandler(BadRequest)
+def _handle_bad_request(e):
+    return jsonify({"ok": False, "error": e.message}), 400
+
+
+@app.errorhandler(Exception)
+def _handle_unexpected(e):
+    """Answer with JSON so the UI can show the reason instead of an HTML page."""
+    if isinstance(e, HTTPException):
+        return jsonify({"ok": False, "error": e.description}), e.code
+    app.logger.exception("Необработена грешка при %s %s", request.method, request.path)
+    return jsonify({"ok": False, "error": f"Вътрешна грешка: {e}"}), 500
+
 
 # ── Pages ─────────────────────────────────────────────────────
 @app.route("/")
 def index():
-    return render_template("index.html")
+    return render_template("index.html", version=core.__version__)
 
 # ── Dashboard API ─────────────────────────────────────────────
 @app.route("/api/dashboard")
@@ -38,20 +146,24 @@ def api_apartments():
 
 @app.route("/api/apartments", methods=["POST"])
 def api_create_apartment():
-    d = request.json
+    d = body()
     apt_id = core.create_apartment(
-        d["number"], d.get("floor"), d.get("area_m2"),
-        d.get("ideal_parts"), d.get("has_dog", False), d.get("notes", ""),
+        req_text(d, "number", "Номер"), opt_int(d, "floor", None, "Етаж"),
+        opt_num(d, "area_m2", None, "Кв. м"), opt_num(d, "ideal_parts", None, "Ид. части"),
+        opt_int(d, "has_dog", 0, "Кучета"), opt_text(d, "notes"),
         d.get("uses_elevator", True)
     )
     return jsonify({"id": apt_id})
 
 @app.route("/api/apartments/<int:apt_id>", methods=["PUT"])
 def api_update_apartment(apt_id):
-    d = request.json
-    core.update_apartment(apt_id, d["number"], d.get("floor"),
-                          d.get("area_m2"), d.get("ideal_parts"),
-                          d.get("has_dog", False), d.get("notes",""),
+    d = body()
+    core.update_apartment(apt_id, req_text(d, "number", "Номер"),
+                          opt_int(d, "floor", None, "Етаж"),
+                          opt_num(d, "area_m2", None, "Кв. м"),
+                          opt_num(d, "ideal_parts", None, "Ид. части"),
+                          opt_int(d, "has_dog", 0, "Кучета"),
+                          opt_text(d, "notes"),
                           d.get("uses_elevator", True))
     return jsonify({"ok": True})
 
@@ -73,30 +185,47 @@ def api_apartment_detail(apt_id):
         "chips":     [dict(c) for c in chips],
     })
 
+@app.route("/api/apartments/<int:apt_id>/verify", methods=["POST"])
+def api_verify_apartment(apt_id):
+    """Mark the apartment's data as checked against reality — or undo the mark."""
+    d = body()
+    verified = bool(d.get("verified", True))
+    row = core.set_apartment_verified(apt_id, verified,
+                                      opt_text(d, "verified_by") or "admin")
+    if row is None:
+        abort(404, description="Апартаментът не е намерен")
+    return jsonify({"ok": True, "verified_at": row["verified_at"],
+                    "verified_by": row["verified_by"]})
+
 # ── Owner API ─────────────────────────────────────────────────
 @app.route("/api/apartments/<int:apt_id>/owner", methods=["POST"])
 def api_save_owner(apt_id):
-    d = request.json
-    core.save_owner(apt_id, d.get("full_name",""), d.get("egn",""),
-                    d.get("phone",""), d.get("email",""),
-                    d.get("address",""), d.get("notes",""))
+    d = body()
+    core.save_owner(apt_id, opt_text(d, "full_name"), opt_text(d, "egn"),
+                    opt_text(d, "phone"), opt_text(d, "email"),
+                    opt_text(d, "address"), opt_text(d, "notes"))
     return jsonify({"ok": True})
 
 # ── Residents API ─────────────────────────────────────────────
 @app.route("/api/residents", methods=["POST"])
 def api_add_resident():
-    d = request.json
-    rid = core.add_resident(d["apt_id"], d.get("full_name",""),
-                            d.get("egn",""), d.get("phone",""),
-                            d.get("email",""), d.get("role","resident"))
+    d = body()
+    rid = core.add_resident(req_int(d, "apt_id", "Апартамент"),
+                            opt_text(d, "full_name"),
+                            opt_text(d, "egn"), opt_text(d, "phone"),
+                            opt_text(d, "email"),
+                            one_of(d, "role", ("resident", "owner", "tenant"),
+                                   "Роля", required=False, default="resident"))
     return jsonify({"id": rid})
 
 @app.route("/api/residents/<int:rid>", methods=["PUT"])
 def api_update_resident(rid):
-    d = request.json
-    core.update_resident(rid, d.get("full_name",""), d.get("egn",""),
-                         d.get("phone",""), d.get("email",""),
-                         d.get("role","resident"), d.get("active", True))
+    d = body()
+    core.update_resident(rid, opt_text(d, "full_name"), opt_text(d, "egn"),
+                         opt_text(d, "phone"), opt_text(d, "email"),
+                         one_of(d, "role", ("resident", "owner", "tenant"),
+                                "Роля", required=False, default="resident"),
+                         d.get("active", True))
     return jsonify({"ok": True})
 
 @app.route("/api/residents/<int:rid>", methods=["DELETE"])
@@ -107,16 +236,20 @@ def api_delete_resident(rid):
 # ── Chips API ─────────────────────────────────────────────────
 @app.route("/api/chips", methods=["POST"])
 def api_add_chip():
-    d = request.json
-    cid = core.add_chip(d["apt_id"], d.get("chip_number",""),
-                        d.get("issued_to",""), d.get("issued_date",""),
-                        d.get("status","active"), d.get("notes",""))
+    d = body()
+    cid = core.add_chip(req_int(d, "apt_id", "Апартамент"),
+                        opt_text(d, "chip_number"),
+                        opt_text(d, "issued_to"), opt_text(d, "issued_date"),
+                        one_of(d, "status", ("active", "blocked", "lost"),
+                               "Статус", required=False, default="active"),
+                        opt_text(d, "notes"))
     return jsonify({"id": cid})
 
 @app.route("/api/chips/<int:chip_id>", methods=["PUT"])
 def api_update_chip(chip_id):
-    d = request.json
-    core.update_chip_status(chip_id, d["status"])
+    d = body()
+    core.update_chip_status(
+        chip_id, one_of(d, "status", ("active", "blocked", "lost"), "Статус"))
     return jsonify({"ok": True})
 
 @app.route("/api/chips/<int:chip_id>", methods=["DELETE"])
@@ -132,13 +265,15 @@ def api_fee_settings():
 
 @app.route("/api/finance/fee-settings", methods=["POST"])
 def api_save_fee_settings():
-    d = request.json
-    if not PERIOD_RE.match(d.get("valid_from", "")):
+    d = body()
+    if not PERIOD_RE.match(str(d.get("valid_from", ""))):
         return jsonify({"ok": False,
                         "error": "valid_from трябва да е във формат ГГГГ-ММ"}), 400
-    core.save_fee_settings(d["valid_from"], d["fixed_fee"],
-                           d["per_resident_fee"], d["dog_fee"],
-                           d.get("elevator_fee", 0))
+    core.save_fee_settings(d["valid_from"],
+                           req_num(d, "fixed_fee", "Фиксирана такса"),
+                           req_num(d, "per_resident_fee", "Такса на живущ"),
+                           req_num(d, "dog_fee", "Такса куче"),
+                           opt_num(d, "elevator_fee", 0, "Такса асансьор"))
     return jsonify({"ok": True})
 
 @app.route("/api/finance/fees/<period>")
@@ -148,18 +283,21 @@ def api_monthly_fees(period):
 
 @app.route("/api/finance/fees/generate/<period>", methods=["POST"])
 def api_generate_fees(period):
-    body = request.get_json(force=True, silent=True) or {}
-    regenerate = body.get("regenerate", False)
+    if not PERIOD_RE.match(period):
+        raise BadRequest("Периодът трябва да е във формат ГГГГ-ММ")
+    b = request.get_json(silent=True) or {}
+    regenerate = bool(b.get("regenerate", False))
     count = core.generate_monthly_fees(period, regenerate=regenerate)
     core.apply_credits_for_period(period)
     return jsonify({"generated": count})
 
 @app.route("/api/finance/fees/<int:fee_id>", methods=["PUT"])
 def api_update_fee(fee_id):
-    d = request.json
-    core.update_monthly_fee(fee_id, d.get("adjustment", 0),
-                            d.get("adjustment_note",""),
-                            d.get("status","pending"),
+    d = body()
+    core.update_monthly_fee(fee_id, opt_num(d, "adjustment", 0, "Корекция"),
+                            opt_text(d, "adjustment_note"),
+                            one_of(d, "status", ("pending", "partial", "paid"),
+                                   "Статус", required=False, default="pending"),
                             d.get("paid_date"),
                             d.get("payment_method"))
     return jsonify({"ok": True})
@@ -177,21 +315,26 @@ def api_advance_payments():
 
 @app.route("/api/finance/advance-payments", methods=["POST"])
 def api_record_advance_payment():
-    d = request.json
+    d = body()
+    apt_id = req_int(d, "apt_id", "Апартамент")
     new_id = core.record_advance_payment(
-        d["apt_id"], d["amount"], d["date"], d.get("note", ""),
-        d.get("payment_method", "bank")
+        apt_id, req_num(d, "amount", "Сума"), req_text(d, "date", "Дата"),
+        opt_text(d, "note"),
+        one_of(d, "payment_method", ("bank", "cash"), "Начин на плащане",
+               required=False, default="bank")
     )
     # Auto-apply to any pending obligations for this apartment
-    core.apply_credits_for_apartment(d["apt_id"])
+    core.apply_credits_for_apartment(apt_id)
     return jsonify({"id": new_id})
 
 @app.route("/api/finance/advance-payments/<int:adv_id>", methods=["PUT"])
 def api_update_advance_payment(adv_id):
-    d = request.json
+    d = body()
     try:
         core.update_advance_payment(
-            adv_id, d["amount"], d["remaining"], d["date"], d.get("note", "")
+            adv_id, req_num(d, "amount", "Сума"),
+            req_num(d, "remaining", "Остатък"),
+            req_text(d, "date", "Дата"), opt_text(d, "note")
         )
     except ValueError as e:
         return jsonify({"ok": False, "error": str(e)}), 400
@@ -211,11 +354,17 @@ def api_transactions():
 
 @app.route("/api/finance/transactions", methods=["POST"])
 def api_add_transaction():
-    d = request.json
-    fid = core.add_transaction(d["type"], d["amount"], d["date"],
-                               d.get("category_id"), d.get("description",""),
-                               d.get("period"), d.get("apt_id"),
-                               d.get("payment_method", "bank"))
+    d = body()
+    fid = core.add_transaction(one_of(d, "type", ("income", "expense"), "Тип"),
+                               req_num(d, "amount", "Сума"),
+                               req_text(d, "date", "Дата"),
+                               opt_int(d, "category_id", None, "Категория"),
+                               opt_text(d, "description"),
+                               d.get("period"),
+                               opt_int(d, "apt_id", None, "Апартамент"),
+                               one_of(d, "payment_method", ("bank", "cash"),
+                                      "Начин на плащане", required=False,
+                                      default="bank"))
     return jsonify({"id": fid})
 
 @app.route("/api/finance/transactions/<int:fid>", methods=["DELETE"])
@@ -231,8 +380,10 @@ def api_categories():
 
 @app.route("/api/finance/categories", methods=["POST"])
 def api_add_category():
-    d = request.get_json(force=True, silent=True) or {}
-    core.add_category(d["name"], d.get("group_name", ""), d.get("type", "expense"))
+    d = body()
+    core.add_category(req_text(d, "name", "Име"), opt_text(d, "group_name"),
+                      one_of(d, "type", ("income", "expense"), "Тип",
+                             required=False, default="expense"))
     return jsonify({"ok": True})
 
 @app.route("/api/finance/categories/<int:cat_id>", methods=["DELETE"])
@@ -255,6 +406,8 @@ def api_audit():
 # ── Reports API ───────────────────────────────────────────────
 @app.route("/api/reports/generate/<period>", methods=["POST"])
 def api_generate_report(period):
+    if not PERIOD_RE.match(period):
+        raise BadRequest("Периодът трябва да е във формат ГГГГ-ММ")
     try:
         path = generate_monthly_report(period, REPORTS_DIR)
         return jsonify({"ok": True, "filename": os.path.basename(path)})
@@ -272,9 +425,9 @@ def api_generate_residents_report():
 @app.route("/api/reports/generate-range", methods=["POST"])
 def api_generate_range_report():
     from reports.pdf_generator import generate_range_report
-    d = request.json
-    period_from = d.get("period_from", "")
-    period_to   = d.get("period_to",   "")
+    d = body()
+    period_from = str(d.get("period_from", ""))
+    period_to   = str(d.get("period_to",   ""))
     if not period_from or not period_to:
         return jsonify({"ok": False, "error": "period_from and period_to required"}), 400
     if period_from > period_to:
@@ -337,9 +490,9 @@ def _safe_report_path(filename):
 @app.route("/api/reports/generate-cash", methods=["POST"])
 def api_generate_cash_report():
     from reports.pdf_generator import generate_cash_report
-    d = request.json or {}
-    date_from = d.get("date_from", "")
-    date_to   = d.get("date_to",   "")
+    d = request.get_json(silent=True) or {}
+    date_from = str(d.get("date_from", ""))
+    date_to   = str(d.get("date_to",   ""))
     if not date_from or not date_to:
         return jsonify({"ok": False, "error": "date_from and date_to required"}), 400
     if date_from > date_to:
@@ -349,6 +502,25 @@ def api_generate_cash_report():
         return jsonify({"ok": True, "filename": os.path.basename(path)})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
+
+
+def _use_utf8_console():
+    """Make the terminal window print Cyrillic instead of mojibake.
+
+    Windows consoles start on a legacy codepage (866/1251), so the startup
+    line came out as garbage. Harmless no-op everywhere else.
+    """
+    if os.name == "nt":
+        try:
+            import ctypes
+            ctypes.windll.kernel32.SetConsoleOutputCP(65001)
+        except Exception:
+            pass
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
 
 
 def _pick_port(preferred):
@@ -366,10 +538,15 @@ def _pick_port(preferred):
 
 
 if __name__ == "__main__":
+    _use_utf8_console()
     port = _pick_port(int(os.environ.get("ES_PORT", "5050")))
-    print(f" * ЕС Мениджър: http://localhost:{port}")
-    def open_browser():
-        import time; time.sleep(1)
-        webbrowser.open(f"http://localhost:{port}")
-    threading.Thread(target=open_browser, daemon=True).start()
+    print(f" * ЕС Мениджър v{core.__version__}: http://localhost:{port}")
+    print(f" * Данни: {core.DATA_DIR}")
+    # ES_NO_BROWSER=1 keeps the browser shut — for automated runs and for
+    # people who would rather open the address themselves.
+    if not os.environ.get("ES_NO_BROWSER"):
+        def open_browser():
+            import time; time.sleep(1)
+            webbrowser.open(f"http://localhost:{port}")
+        threading.Thread(target=open_browser, daemon=True).start()
     app.run(debug=False, port=port)

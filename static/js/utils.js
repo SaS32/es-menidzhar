@@ -1,6 +1,3 @@
-// ── App version ───────────────────────────────────────────────
-const APP_VERSION = "2.3.0";
-
 // ── Toast ─────────────────────────────────────────────────────
 // Errors stay longer; any toast can be dismissed by clicking it.
 function toast(msg, type = "") {
@@ -114,6 +111,13 @@ function feeStatusBadge(status) {
   };
   const [cls, lbl] = map[status] || ['badge-gray', status];
   return `<span class="badge ${cls}">${lbl}</span>`;
+}
+
+// The apartment data-verification mark. No stamp = never checked.
+function verifiedBadge(apt) {
+  return apt && apt.verified_at
+    ? `<span class="badge badge-green" title="Потвърдено от ${escAttr(apt.verified_by || "—")}">✓ Проверени данни · ${escAttr(apt.verified_at)}</span>`
+    : `<span class="badge badge-gray" title="Данните не са сверявани след последната промяна">Непроверени данни</span>`;
 }
 
 function chipStatusBadge(status) {

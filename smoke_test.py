@@ -115,6 +115,46 @@ try:
 except ValueError:
     check("remaining > amount rejected", True)
 
+# ── Verification mark: set, survive unrelated edits, clear on real edits ─────
+check("apartment starts unverified", dict(core.get_apartment(a1))["verified_at"] is None)
+
+row = core.set_apartment_verified(a1, True, "домоуправител")
+check("verify sets a stamp", row["verified_at"] is not None, row["verified_at"])
+check("verify records who", row["verified_by"] == "домоуправител", row["verified_by"])
+
+# A change on a *different* apartment must not touch this mark.
+core.update_apartment(a2, "2", 1, 60, 4.0, 0, "", True)
+check("other apartment's edit keeps the mark",
+      dict(core.get_apartment(a1))["verified_at"] is not None)
+
+# Editing a resident of THIS apartment invalidates it.
+r_id = core.get_residents(a1)[0]["id"]
+core.update_resident(r_id, "Иван Петров", "", "", "", "resident", 1)
+check("resident edit clears the mark",
+      dict(core.get_apartment(a1))["verified_at"] is None)
+
+core.set_apartment_verified(a1, True)
+core.save_owner(a1, "Нов Собственик", "", "", "", "", "")
+check("owner edit clears the mark", dict(core.get_apartment(a1))["verified_at"] is None)
+
+core.set_apartment_verified(a1, True)
+core.add_resident(a1, "Трети Живущ", "", "", "", "resident")
+check("new resident clears the mark", dict(core.get_apartment(a1))["verified_at"] is None)
+
+core.set_apartment_verified(a1, True)
+core.set_apartment_verified(a1, False)
+check("unverify clears the mark", dict(core.get_apartment(a1))["verified_at"] is None)
+check("verify on a missing apartment returns None",
+      core.set_apartment_verified(999999, True) is None)
+
+# The mark travels with the apartment list the UI reads.
+listed = {a["id"]: dict(a) for a in core.get_all_apartments()}
+check("list exposes verified_at", "verified_at" in listed[a1], list(listed[a1])[:3])
+
+# Fee generation must not be affected by any of the above.
+n = core.generate_monthly_fees("2026-03")
+check("fees still generate after verification edits", n == 2, n)
+
 # ── PDFs build without errors, with the Cyrillic font found ───────────────────
 import reports.pdf_generator as pg
 check("bundled DejaVu fonts found", pg.FONT_REG == "F", pg.FONT_REG)

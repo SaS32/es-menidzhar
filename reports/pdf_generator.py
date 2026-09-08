@@ -22,8 +22,9 @@ from core.accounting import summarise_fees
 # no Cyrillic). If Cyrillic appears as boxes/blanks, the font path is wrong.
 #
 def _fonts_dir():
-    base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    return os.path.join(base, "static", "fonts")
+    # Bundled resource: inside the PyInstaller unpack folder when frozen.
+    from core.paths import resource
+    return resource("static", "fonts")
 
 def _register_fonts():
     fd = _fonts_dir()
@@ -410,10 +411,8 @@ def generate_monthly_report(period, output_dir=None):
     global _GEN_AT
 
     if not output_dir:
-        output_dir = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "reports", "generated"
-        )
+        from core.paths import data
+        output_dir = data("reports", "generated")
     os.makedirs(output_dir, exist_ok=True)
 
     filepath = os.path.join(output_dir, f"otchet_{period}.pdf")
@@ -554,10 +553,8 @@ def generate_range_report(period_from, period_to, output_dir=None):
     global _GEN_AT
 
     if not output_dir:
-        output_dir = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "reports", "generated"
-        )
+        from core.paths import data
+        output_dir = data("reports", "generated")
     os.makedirs(output_dir, exist_ok=True)
 
     safe_from = period_from.replace("-", "")
@@ -692,10 +689,8 @@ def generate_residents_report(output_dir=None):
     global _GEN_AT
 
     if not output_dir:
-        output_dir = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "reports", "generated"
-        )
+        from core.paths import data
+        output_dir = data("reports", "generated")
     os.makedirs(output_dir, exist_ok=True)
 
     now = datetime.now()
@@ -845,10 +840,8 @@ def generate_cash_report(date_from, date_to, output_dir=None):
     global _GEN_AT
 
     if not output_dir:
-        output_dir = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "reports", "generated"
-        )
+        from core.paths import data
+        output_dir = data("reports", "generated")
     os.makedirs(output_dir, exist_ok=True)
 
     summary = core.get_cash_summary(date_from, date_to)

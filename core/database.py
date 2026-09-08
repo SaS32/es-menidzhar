@@ -2,7 +2,11 @@ import sqlite3
 import os
 from datetime import datetime
 
-DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "etazna.db")
+from .paths import DATA_DIR
+
+# The database lives in the writable data directory (next to the .exe in a
+# frozen build), never inside the read-only PyInstaller bundle.
+DB_PATH = os.path.join(DATA_DIR, "etazna.db")
 
 def get_connection():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30)
@@ -26,6 +30,8 @@ def init_db():
         has_dog INTEGER DEFAULT 0,
         uses_elevator INTEGER DEFAULT 1,
         notes TEXT,
+        verified_at TEXT,
+        verified_by TEXT,
         created_at TEXT DEFAULT (datetime('now')),
         updated_at TEXT DEFAULT (datetime('now'))
     );
@@ -210,6 +216,10 @@ def init_db():
         ("fee_settings", "elevator_fee", "REAL DEFAULT 0"),
         ("monthly_fees", "uses_elevator", "INTEGER DEFAULT 1"),
         ("monthly_fees", "elevator_fee", "REAL DEFAULT 0"),
+        # Data-verification mark. NULL verified_at = never checked; existing
+        # apartments start unverified, which is the honest default.
+        ("apartments", "verified_at", "TEXT"),
+        ("apartments", "verified_by", "TEXT"),
     ]:
         existing = [r[1] for r in c.execute(f"PRAGMA table_info({tbl})").fetchall()]
         if col not in existing:

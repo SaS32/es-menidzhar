@@ -223,6 +223,9 @@ td.mono  { font-family: ui-monospace, Consolas, "Cascadia Mono", monospace; font
 .apt-num  { font-size: 15px; font-weight: 600; }
 .apt-name { font-size: 12px; color: var(--text3); margin-top: 1px; }
 .apt-meta { font-size: 11px; color: var(--text4); }
+/* Data-verification tick in the apartment list. */
+.apt-verified { color: var(--green); font-weight: 700; }
+.apt-item.active .apt-verified { color: inherit; }
 
 /* ── Forms ───────────────────────────────────────────────── */
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }

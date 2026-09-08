@@ -1,3 +1,10 @@
+# ── ЕС Мениджър ──────────────────────────────────────────────────────────────
+# Single source of truth for the version number. The UI footer, the PDF
+# reports and the build script all read it from here — do not hard-code the
+# version anywhere else.
+__version__ = "2.3.0"
+
+from .paths import RESOURCE_DIR, DATA_DIR, resource, data
 from .database import init_db, get_connection, audit, backup_db
 from .apartments import *
 from .finance import (

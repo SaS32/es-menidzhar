@@ -28,7 +28,8 @@ function renderAptList(rows) {
     <div class="apt-item ${r.id === _selectedAptId ? 'active' : ''}"
          onclick="selectApt(${r.id})">
       <div>
-        <div class="apt-num">Ап. № ${esc(r.number)}</div>
+        <div class="apt-num">Ап. № ${esc(r.number)}${r.verified_at
+          ? ` <span class="apt-verified" title="Проверени данни · ${escAttr(r.verified_at)}">✓</span>` : ""}</div>
         <div class="apt-name">${esc(r.owner_name)}</div>
       </div>
       <div style="text-align:right">
@@ -54,8 +55,13 @@ async function loadAptDetail(id) {
       <div>
         <div class="detail-title">Апартамент № ${esc(apt.number)}</div>
         <div class="text-muted text-sm">Етаж ${apt.floor || '—'} · ${apt.area_m2 || '—'} м² · ${apt.ideal_parts || '—'} ид. ч.${apt.has_dog ? ` · ${apt.has_dog > 1 ? apt.has_dog + ' × ' : ''}🐕` : ''}${apt.uses_elevator === 0 ? ' · <span class="badge badge-gray">без асансьор</span>' : ''}</div>
+        <div style="margin-top:6px">${verifiedBadge(apt)}</div>
       </div>
       <div class="flex gap-2">
+        <button class="btn ${apt.verified_at ? 'btn-secondary' : 'btn-primary'} btn-sm"
+                onclick="toggleAptVerified(${apt.id}, ${apt.verified_at ? 'false' : 'true'})"
+                title="Сверете данните за апартамента, собственика и живущите">${
+          apt.verified_at ? '✕ Отмени проверката' : '✓ Потвърди данните'}</button>
         <button class="btn btn-secondary btn-sm" onclick="editApt(${apt.id})">✎ Редактирай</button>
         <button class="btn btn-danger btn-sm" onclick="deleteApt(${apt.id})">Изтрий</button>
       </div>
@@ -136,6 +142,20 @@ async function loadAptDetail(id) {
         </table>
       </div>
     </div>`;
+}
+
+// ── Data verification ─────────────────────────────────────
+// The mark says "someone checked this apartment, its owner and its residents
+// against reality". The server clears it on the next edit to any of the three,
+// so always reload from the server after this call — never patch the badge
+// locally, or the UI will show a tick the database no longer holds.
+async function toggleAptVerified(id, verified) {
+  try {
+    await api.post(`/api/apartments/${id}/verify`, { verified });
+    await loadApartments();
+    await loadAptDetail(id);
+    toast(verified ? "Данните са потвърдени" : "Потвърждението е отменено", "success");
+  } catch (e) { toast("Грешка: " + e.message, "error"); }
 }
 
 function roleLabel(r) {

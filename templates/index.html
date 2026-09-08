@@ -50,7 +50,7 @@
       <button class="refresh-btn" id="zoomToggle" onclick="cycleZoom()" style="margin-top:6px" title="Размер на текста">
         Aa · 100%
       </button>
-      <div class="version" id="appVersion">v2.0.0 · Flask</div>
+      <div class="version" id="appVersion">v{{ version }} · Flask</div>
     </div>
   </aside>
 
@@ -79,6 +79,9 @@
 <!-- Toast notifications -->
 <div id="toastContainer"></div>
 
+<!-- The version comes from core.__version__ (core/__init__.py) — the single
+     source of truth. The footer above and APP_VERSION below both read it. -->
+<script>const APP_VERSION = "{{ version }}";</script>
 <script src="/static/js/api.js"></script>
 <script src="/static/js/utils.js"></script>
 <script src="/static/js/dashboard.js"></script>
