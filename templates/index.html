@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="bg">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ЕС Мениджър</title>
+<link rel="stylesheet" href="/static/css/app.css">
+</head>
+<body>
+
+<div class="layout">
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div class="sidebar-logo">
+      <span class="logo-icon">⬡</span>
+      <div>
+        <div class="logo-title">ЕС Мениджър</div>
+        <div class="logo-sub">Етажна собственост</div>
+      </div>
+    </div>
+
+    <nav class="sidebar-nav">
+      <button class="nav-btn active" data-page="dashboard" title="Начало">
+        <span class="nav-icon">⌂</span><span class="nav-label">Начало</span>
+      </button>
+      <button class="nav-btn" data-page="apartments" title="Апартаменти">
+        <span class="nav-icon">🏠</span><span class="nav-label">Апартаменти</span>
+      </button>
+      <button class="nav-btn" data-page="finance" title="Финанси">
+        <span class="nav-icon">💰</span><span class="nav-label">Финанси</span>
+      </button>
+      <button class="nav-btn" data-page="reports" title="Отчети">
+        <span class="nav-icon">📄</span><span class="nav-label">Отчети</span>
+      </button>
+      <button class="nav-btn" data-page="audit" title="Архив">
+        <span class="nav-icon">📋</span><span class="nav-label">Архив</span>
+      </button>
+      <button class="nav-btn" data-page="help" title="Помощ">
+        <span class="nav-icon">❓</span><span class="nav-label">Помощ</span>
+      </button>
+    </nav>
+
+    <div class="sidebar-footer">
+      <button class="refresh-btn" id="refreshBtn" onclick="refreshPage()">
+        ↻ Обнови данните
+      </button>
+      <button class="refresh-btn" id="themeToggle" onclick="toggleTheme()" style="margin-top:6px">
+        ☀ Светла тема
+      </button>
+      <button class="refresh-btn" id="zoomToggle" onclick="cycleZoom()" style="margin-top:6px" title="Размер на текста">
+        Aa · 100%
+      </button>
+      <div class="version" id="appVersion">v2.0.0 · Flask</div>
+    </div>
+  </aside>
+
+  <!-- Main content -->
+  <main class="main">
+    <div id="page-dashboard"  class="page active"></div>
+    <div id="page-apartments" class="page"></div>
+    <div id="page-finance"    class="page"></div>
+    <div id="page-reports"    class="page"></div>
+    <div id="page-audit"      class="page"></div>
+    <div id="page-help"       class="page"></div>
+  </main>
+</div>
+
+<!-- Modal overlay -->
+<div class="modal-overlay" id="modalOverlay" onclick="closeModal(event)">
+  <div class="modal" id="modal">
+    <div class="modal-header">
+      <h3 id="modalTitle">Диалог</h3>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body" id="modalBody"></div>
+  </div>
+</div>
+
+<!-- Toast notifications -->
+<div id="toastContainer"></div>
+
+<script src="/static/js/api.js"></script>
+<script src="/static/js/utils.js"></script>
+<script src="/static/js/dashboard.js"></script>
+<script src="/static/js/apartments.js"></script>
+<script src="/static/js/finance.js"></script>
+<script src="/static/js/reports.js"></script>
+<script src="/static/js/audit.js"></script>
+<script src="/static/js/help.js"></script>
+<script src="/static/js/app.js"></script>
+</body>
+</html>
