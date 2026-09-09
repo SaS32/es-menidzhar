@@ -1,0 +1,22 @@
+name: Предложение
+description: Идея за нова възможност или подобрение
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ⚠️ **Не прилагайте реални лични данни** — без база, отчети или снимки с имена и ЕГН.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Какъв е проблемът
+      description: Какво ви пречи сега? Опишете случая, не решението.
+    validations:
+      required: true
+
+  - type: textarea
+    id: idea
+    attributes:
+      label: Предложение
+      description: Как си представяте, че трябва да работи?

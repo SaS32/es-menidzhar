@@ -1,26 +1,41 @@
 # ── Live data — never commit ────────────────────────────────
-# etazna.db holds personal data (имена, ЕГН, телефони) and changes on
-# every run. Backups are handled by core.database.backup_db(), not git.
+# The database holds personal data (имена, ЕГН, телефони, адреси) and changes
+# on every run. Backups are handled by core.database.backup_db(), not git.
+# Patterns are broad on purpose: a stray copy in any folder stays out too.
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
 etazna.db
-etazna.db-wal
-etazna.db-shm
 backups/
-reports/generated/*.pdf
+**/backups/
+
+# Generated reports contain resident names — keep the folder, drop the files.
+reports/generated/*
+!reports/generated/.gitkeep
 
 # ── Python ──────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 .venv/
 venv/
+.buildvenv/
+*.egg-info/
 
 # ── PyInstaller build output ────────────────────────────────
 build/
 dist/
+*.exe
 
 # ── OS / tooling junk ───────────────────────────────────────
 *.stackdump
 Thumbs.db
 .DS_Store
+*.swp
+*~
 
-# Local Claude Code permissions (machine-specific)
+# ── Editor / local tooling ──────────────────────────────────
+.idea/
+.vscode/
 .claude/settings.local.json

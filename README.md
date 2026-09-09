@@ -1,5 +1,20 @@
 # ЕС Мениджър — Web версия v2.3.0
 
+*Bulgarian condominium (етажна собственост) management — a local-first web app.*
+
+**English summary.** ЕС Мениджър is a self-hosted tool for running the finances of a
+Bulgarian apartment building: monthly fees per apartment, expenses and income,
+resident and owner registers, access chips, PDF reports and a full change log.
+It is a single Flask app over one SQLite file, built for a house manager on one
+machine — no accounts, no cloud, no telemetry. The interface and documentation are
+in Bulgarian, because the fee rules it implements are Bulgarian.
+
+Run it with `pip install -r requirements.txt && python app.py`, or grab the Windows
+`.exe` from the releases page. Your data stays in `etazna.db` next to the program and
+is never uploaded anywhere. Licensed under the [MIT License](LICENSE).
+
+---
+
 Система за управление на етажна собственост — такси, разходи, приходи, отчети и регистър на живущите.
 
 > Версията се пази на едно място — `core/__init__.py` (`__version__`). Всичко останало (футърът в интерфейса, името на `.exe` файла, документацията) я чете оттам.
@@ -72,6 +87,8 @@ PyInstaller е нужен само за изграждане на `.exe` и се
 
 ```
 ES_Menidzhar/
+├── LICENSE              — MIT лиценз
+├── .github/             — CI (smoke test) и шаблони за issue
 ├── app.py               — Flask сървър, API маршрути и проверка на заявките
 ├── requirements.txt     — Python зависимости
 ├── smoke_test.py        — Проверка на изчисленията и PDF отчетите
@@ -120,3 +137,46 @@ ES_Menidzhar/
 - При всяко стартиране се прави дневно копие в `backups/` (пазят се последните 30).
 - Генерираните PDF отчети се съхраняват в `reports/generated/`.
 - За спиране на сървъра натиснете **Ctrl+C** в терминала.
+
+---
+
+## Лични данни и поверителност
+
+Програмата работи **само на вашия компютър**. Няма сървър в интернет, няма
+регистрация, няма изпращане на статистика.
+
+- Всички данни живеят в `etazna.db` до програмата. Никой освен вас няма достъп
+  до тях, освен ако сами не копирате файла някъде.
+- Базата съдържа **лични данни** — имена, ЕГН, телефони, адреси. Като администратор
+  на етажната собственост вие сте администратор и на тези данни по смисъла на GDPR.
+- **Никога не качвайте `etazna.db`, папката `backups/` или готови PDF отчети в GitHub
+  или друго публично място.** `.gitignore` в това хранилище вече ги спира, но
+  проверявайте преди `git add`.
+- Сървърът слуша само на `localhost` — не е достъпен от други машини в мрежата.
+  Не го публикувайте в интернет: програмата няма пароли и никого не проверява.
+- Архив на промените (`audit_log`) пази кой какво е редактирал. Изтриването на
+  апартамент не изтрива историята му.
+
+---
+
+## Принос
+
+Съобщения за грешки и предложения — през **Issues**. Промени — през Pull Request.
+Преди да пуснете PR:
+
+```bash
+python smoke_test.py     # трябва да мине без FAIL
+```
+
+Никога не прилагайте реални данни (база, отчети, снимки с имена или ЕГН) към
+issue или PR. Опишете проблема с измислени данни.
+
+---
+
+## Лиценз
+
+[MIT](LICENSE) — свободно за ползване, промяна и разпространение, включително с
+търговска цел. Единственото условие е да запазите бележката за авторство.
+
+Софтуерът се предоставя „както е“, без гаранция. Изчисленията на такси са ваша
+отговорност — сверявайте ги с решенията на общото събрание.

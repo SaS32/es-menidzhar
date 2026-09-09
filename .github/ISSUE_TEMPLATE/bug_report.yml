@@ -1,0 +1,52 @@
+name: Съобщение за грешка
+description: Нещо не работи както трябва
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ⚠️ **Не прилагайте реални лични данни.** Без `etazna.db`, без PDF отчети,
+        без снимки с имена, ЕГН или телефони. Опишете случая с измислени данни.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: Какво се случва
+      description: Какво очаквахте и какво стана вместо това?
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Стъпки за възпроизвеждане
+      placeholder: |
+        1. Отварям „Финанси“
+        2. Натискам „Начисли такси“
+        3. ...
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Версия
+      description: Пише в долния край на екрана, напр. 2.3.0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: how-run
+    attributes:
+      label: Как стартирате програмата
+      options:
+        - Готов .exe файл (Windows)
+        - От изходния код (python app.py)
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Операционна система
+      placeholder: Windows 11 / Ubuntu 24.04 / macOS 15

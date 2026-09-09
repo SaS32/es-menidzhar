@@ -1,0 +1,24 @@
+# Normalise text in the repo, check out native line endings per platform.
+* text=auto
+
+# Windows scripts must keep CRLF or cmd.exe mis-parses them.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Shell scripts must keep LF or bash refuses to run them.
+*.sh  text eol=lf
+
+# Source and docs are text.
+*.py   text
+*.js   text
+*.css  text
+*.html text
+*.md   text
+*.txt  text
+*.spec text
+
+# Binary — never touch, never diff.
+*.ttf  binary
+*.db   binary
+*.pdf  binary
+*.exe  binary

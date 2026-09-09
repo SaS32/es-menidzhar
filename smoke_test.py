@@ -2,6 +2,12 @@
 # Uses a temporary DB — never touches etazna.db.
 import os, sys, tempfile, shutil
 
+# The labels below are Bulgarian and use arrows. A Windows console defaults to a
+# legacy codepage (cp1251/cp1252) that cannot encode them, and print() would kill
+# the run before it reports a single result. Force UTF-8 on our own output.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 tmpdir = tempfile.mkdtemp(prefix="es_smoke_")
