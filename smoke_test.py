@@ -121,6 +121,65 @@ try:
 except ValueError:
     check("remaining > amount rejected", True)
 
+# ── Bank ↔ safe transfers: move money without inventing income or expense ────
+cash_before = core.get_cash_balance()["balance"]
+sum_before  = core.get_period_summary("2026-01", "2026-01")
+
+t1 = core.add_cash_transfer("2026-01-10", 200.0, "bank_to_cash", "теглене за ремонт")
+t2 = core.add_cash_transfer("2026-01-15", 50.0, "cash_to_bank", "остатък обратно")
+
+check("safe balance moves by +200 −50",
+      core.get_cash_balance()["balance"] == round(cash_before + 150.0, 2),
+      core.get_cash_balance()["balance"])
+
+sum_after = core.get_period_summary("2026-01", "2026-01")
+check("transfer is not income", sum_after["total_income"] == sum_before["total_income"],
+      (sum_before["total_income"], sum_after["total_income"]))
+check("transfer is not an expense",
+      sum_after["total_expenses"] == sum_before["total_expenses"],
+      (sum_before["total_expenses"], sum_after["total_expenses"]))
+check("period balance untouched by transfers",
+      sum_after["balance"] == sum_before["balance"],
+      (sum_before["balance"], sum_after["balance"]))
+
+cs = core.get_cash_summary("2026-01-01", "2026-12-31")
+check("cash report lists both transfers", len(cs["transfers"]) == 2, len(cs["transfers"]))
+check("transfer_in 200", cs["transfer_in"] == 200.0, cs["transfer_in"])
+check("transfer_out 50", cs["transfer_out"] == 50.0, cs["transfer_out"])
+check("closing = opening + movement",
+      cs["closing_balance"] == round(cs["opening_balance"] + cs["balance"], 2),
+      (cs["opening_balance"], cs["balance"], cs["closing_balance"]))
+check("closing balance = running safe balance",
+      cs["closing_balance"] == core.get_cash_balance()["balance"],
+      (cs["closing_balance"], core.get_cash_balance()["balance"]))
+
+# A transfer dated before the range shows up as opening balance, not as movement
+core.add_cash_transfer("2025-06-01", 40.0, "bank_to_cash", "миналогодишно теглене")
+cs = core.get_cash_summary("2026-01-01", "2026-12-31")
+check("earlier transfer lands in the opening balance",
+      cs["opening_balance"] == 40.0, cs["opening_balance"])
+check("earlier transfer is not counted twice",
+      len(cs["transfers"]) == 2, len(cs["transfers"]))
+
+for bad, label in [(-5.0, "negative amount"), (0.0, "zero amount")]:
+    try:
+        core.add_cash_transfer("2026-01-10", bad, "bank_to_cash")
+        check(f"{label} rejected", False)
+    except ValueError:
+        check(f"{label} rejected", True)
+try:
+    core.add_cash_transfer("2026-01-10", 10.0, "bank_to_pocket")
+    check("bad direction rejected", False)
+except ValueError:
+    check("bad direction rejected", True)
+
+core.delete_cash_transfer(t2)
+check("delete removes the movement",
+      core.get_cash_balance()["balance"] == round(cash_before + 200.0 + 40.0, 2),
+      core.get_cash_balance()["balance"])
+# t1 is left in place on purpose: the cash PDF further down must render a
+# populated transfers section, not only the empty-table path.
+
 # ── Verification mark: set, survive unrelated edits, clear on real edits ─────
 check("apartment starts unverified", dict(core.get_apartment(a1))["verified_at"] is None)
 

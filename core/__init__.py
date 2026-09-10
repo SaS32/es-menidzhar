@@ -2,7 +2,7 @@
 # Single source of truth for the version number. The UI footer, the PDF
 # reports and the build script all read it from here — do not hard-code the
 # version anywhere else.
-__version__ = "2.3.0"
+__version__ = "2.4.0"
 
 from .paths import RESOURCE_DIR, DATA_DIR, resource, data
 from .database import init_db, get_connection, audit, backup_db
@@ -16,6 +16,8 @@ from .finance import (
     apply_credit_to_fee, apply_credits_for_apartment, apply_credits_for_period,
     add_transaction, get_transactions, delete_transaction,
     get_period_summary, get_cash_summary, get_dashboard_data,
+    add_cash_transfer, get_cash_transfers, delete_cash_transfer, get_cash_balance,
+    TRANSFER_DIRECTIONS,
 )
 from .audit import get_audit_log
 from .accounting import (

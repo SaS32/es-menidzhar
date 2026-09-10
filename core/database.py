@@ -156,6 +156,20 @@ def init_db():
         created_at TEXT DEFAULT (datetime('now'))
     );
 
+    -- Money moved between the bank account and the building safe.
+    -- A transfer is NOT income and NOT an expense: the association owns the
+    -- same money before and after, only the place it sits changes. It never
+    -- appears in get_period_summary(); it only shifts the bank/cash split.
+    CREATE TABLE IF NOT EXISTS cash_transfers (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        date TEXT NOT NULL,
+        amount REAL NOT NULL,
+        direction TEXT NOT NULL
+            CHECK(direction IN ('bank_to_cash','cash_to_bank')),
+        note TEXT,
+        created_at TEXT DEFAULT (datetime('now'))
+    );
+
     CREATE TABLE IF NOT EXISTS audit_log (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         table_name TEXT NOT NULL,
@@ -246,6 +260,7 @@ def init_db():
     c.execute("CREATE INDEX IF NOT EXISTS idx_residents_apt ON residents(apt_id)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_finances_period ON finances(period)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_advance_payments_apt ON advance_payments(apt_id)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_cash_transfers_date ON cash_transfers(date)")
 
     conn.commit()
     conn.close()

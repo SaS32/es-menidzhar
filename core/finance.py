@@ -8,7 +8,7 @@ from .accounting import (
     compute_balance,
     EPSILON,
 )
-from datetime import datetime
+from datetime import datetime, timedelta
 
 
 # ── Categories ────────────────────────────────────────────────
@@ -633,6 +633,138 @@ def get_dashboard_data():
     }
 
 
+# ── Bank ↔ safe transfers ─────────────────────────────────────
+TRANSFER_DIRECTIONS = ("bank_to_cash", "cash_to_bank")
+
+# Sentinel used when a query has no lower bound — ISO dates sort as text, and
+# this is smaller than any real date, so BETWEEN still works.
+_DATE_MIN = "0000-01-01"
+
+
+def add_cash_transfer(date, amount, direction, note=""):
+    """Move money between the bank account and the building safe.
+
+    'bank_to_cash' — withdrawn from the bank, put into the safe
+    'cash_to_bank' — taken from the safe, deposited into the bank
+
+    A transfer is NEITHER income NOR an expense: the association owns exactly
+    the same money before and after, only the place it sits changes. That is
+    why it lives in its own table and never touches `finances` — booking it as
+    an expense + income pair would double-count both totals in every report.
+    get_period_summary() therefore ignores transfers entirely; only the
+    cash-side numbers (get_cash_balance / get_cash_summary) see them.
+    """
+    if direction not in TRANSFER_DIRECTIONS:
+        raise ValueError("Невалидна посока на прехвърлянето")
+    amount = round(float(amount), 2)
+    if amount <= 0:
+        raise ValueError("Сумата трябва да е положителна")
+    conn = get_connection()
+    cur = conn.execute(
+        "INSERT INTO cash_transfers (date, amount, direction, note) VALUES (?,?,?,?)",
+        (date, amount, direction, note)
+    )
+    tid = cur.lastrowid
+    audit("cash_transfers", tid, "CREATE",
+          new_value=f"date={date},amount={amount},direction={direction}", conn=conn)
+    conn.commit()
+    conn.close()
+    return tid
+
+
+def get_cash_transfers(date_from=None, date_to=None):
+    """Transfer rows in a date range (YYYY-MM-DD), newest first."""
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT * FROM cash_transfers WHERE date BETWEEN ? AND ? ORDER BY date DESC, id DESC",
+        (date_from or _DATE_MIN, date_to or "9999-12-31")
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def delete_cash_transfer(tid):
+    conn = get_connection()
+    old = conn.execute("SELECT * FROM cash_transfers WHERE id=?", (tid,)).fetchone()
+    conn.execute("DELETE FROM cash_transfers WHERE id=?", (tid,))
+    audit("cash_transfers", tid, "DELETE", old_value=dict(old) if old else None, conn=conn)
+    conn.commit()
+    conn.close()
+
+
+def _cash_totals(conn, date_from, date_to):
+    """Cash in/out totals for a date range — the arithmetic behind every
+    safe balance. date_from=None means "since the beginning".
+
+    Sources are the same four the cash report lists, plus transfers:
+      • fees paid in cash — the MANUAL portion only (paid_amount − credit_applied);
+        the credit portion was already counted when the advance was received
+      • advance payments received in cash
+      • other cash income / cash expenses from `finances`
+      • bank→safe transfers in, safe→bank transfers out
+    """
+    df = date_from or _DATE_MIN
+    dt = date_to or "9999-12-31"
+
+    def one(sql):
+        return conn.execute(sql, (df, dt)).fetchone()["t"] or 0.0
+
+    fees = one("""
+        SELECT COALESCE(SUM(ROUND(paid_amount - credit_applied, 2)),0) AS t
+        FROM monthly_fees
+        WHERE payment_method='cash' AND paid_amount - credit_applied > 0.005
+          AND paid_date BETWEEN ? AND ?
+    """)
+    advances = one("""
+        SELECT COALESCE(SUM(amount),0) AS t FROM advance_payments
+        WHERE payment_method='cash' AND date BETWEEN ? AND ?
+    """)
+    income = one("""
+        SELECT COALESCE(SUM(amount),0) AS t FROM finances
+        WHERE type='income' AND payment_method='cash' AND date BETWEEN ? AND ?
+    """)
+    expenses = one("""
+        SELECT COALESCE(SUM(amount),0) AS t FROM finances
+        WHERE type='expense' AND payment_method='cash' AND date BETWEEN ? AND ?
+    """)
+    tr_in = one("""
+        SELECT COALESCE(SUM(amount),0) AS t FROM cash_transfers
+        WHERE direction='bank_to_cash' AND date BETWEEN ? AND ?
+    """)
+    tr_out = one("""
+        SELECT COALESCE(SUM(amount),0) AS t FROM cash_transfers
+        WHERE direction='cash_to_bank' AND date BETWEEN ? AND ?
+    """)
+
+    total_in = round(fees + advances + income, 2)
+    return {
+        "fee_total":       round(fees, 2),
+        "adv_total":       round(advances, 2),
+        "income_total":    round(income, 2),
+        "expense_total":   round(expenses, 2),
+        "transfer_in":     round(tr_in, 2),
+        "transfer_out":    round(tr_out, 2),
+        "total_in":        total_in,
+        # Net change of the safe over the range
+        "net":             round(total_in + tr_in - expenses - tr_out, 2),
+    }
+
+
+def get_cash_balance(as_of=None):
+    """How much cash the safe holds, counting everything up to `as_of`
+    (YYYY-MM-DD, inclusive; None = today and everything recorded).
+
+    Returns the totals dict from _cash_totals with `balance` = the running
+    amount in the safe.
+    """
+    conn = get_connection()
+    t = _cash_totals(conn, None, as_of)
+    conn.close()
+    t["as_of"] = as_of
+    t["balance"] = t["net"]
+    return t
+
+
 # ── Cash-only summary (payment_method='cash') ────────────────
 def get_cash_summary(date_from, date_to):
     """Summary of cash-only flows in a date range (YYYY-MM-DD).
@@ -644,6 +776,15 @@ def get_cash_summary(date_from, date_to):
       • advance_payments.payment_method='cash' → advance cash income
       • finances.type='income' and payment_method='cash' → other cash income
       • finances.type='expense' and payment_method='cash' → cash expenses
+      • cash_transfers → money carried in from the bank / taken to the bank
+
+    Transfers are kept out of total_in / expense_total on purpose: they are not
+    income or expense, only a change of place. They enter the report through
+    their own lines and through the balances.
+
+    opening_balance is everything in the safe before date_from, so
+    closing_balance = opening_balance + net movement of the range — the number
+    that must match the cash actually counted in the safe.
 
     Debug: if a flow is missing, verify its payment_method column.
     """
@@ -685,26 +826,45 @@ def get_cash_summary(date_from, date_to):
         ORDER BY f.date ASC
     """, (date_from, date_to)).fetchall()
 
+    transfers = conn.execute("""
+        SELECT id, date, amount, direction, note
+        FROM cash_transfers
+        WHERE date BETWEEN ? AND ?
+        ORDER BY date ASC, id ASC
+    """, (date_from, date_to)).fetchall()
+
+    # Everything already in the safe the day before the range starts
+    day_before = (datetime.strptime(date_from, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
+    opening_balance = _cash_totals(conn, None, day_before)["net"]
+
     conn.close()
 
     fee_total     = sum(r["amount"] for r in fee_cash)
     adv_total     = sum(r["amount"] for r in adv_cash)
     income_total  = sum(r["amount"] for r in income_cash)
     expense_total = sum(r["amount"] for r in expense_cash)
+    transfer_in   = sum(r["amount"] for r in transfers if r["direction"] == "bank_to_cash")
+    transfer_out  = sum(r["amount"] for r in transfers if r["direction"] == "cash_to_bank")
     total_in      = fee_total + adv_total + income_total
-    balance       = total_in - expense_total
+    # balance = the movement of the range (transfers included, they do move cash)
+    balance       = round(total_in + transfer_in - expense_total - transfer_out, 2)
 
     return {
-        "date_from":    date_from,
-        "date_to":      date_to,
-        "fees":         [dict(r) for r in fee_cash],
-        "advances":     [dict(r) for r in adv_cash],
-        "income":       [dict(r) for r in income_cash],
-        "expenses":     [dict(r) for r in expense_cash],
-        "fee_total":    fee_total,
-        "adv_total":    adv_total,
-        "income_total": income_total,
-        "expense_total":expense_total,
-        "total_in":     total_in,
-        "balance":      balance,
+        "date_from":      date_from,
+        "date_to":        date_to,
+        "fees":           [dict(r) for r in fee_cash],
+        "advances":       [dict(r) for r in adv_cash],
+        "income":         [dict(r) for r in income_cash],
+        "expenses":       [dict(r) for r in expense_cash],
+        "transfers":      [dict(r) for r in transfers],
+        "fee_total":      fee_total,
+        "adv_total":      adv_total,
+        "income_total":   income_total,
+        "expense_total":  expense_total,
+        "transfer_in":    round(transfer_in, 2),
+        "transfer_out":   round(transfer_out, 2),
+        "total_in":       total_in,
+        "balance":        balance,
+        "opening_balance": round(opening_balance, 2),
+        "closing_balance": round(opening_balance + balance, 2),
     }

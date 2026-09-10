@@ -833,7 +833,9 @@ def generate_cash_report(date_from, date_to, output_dir=None):
       • advance payments received in cash
       • other cash income
       • cash expenses
-    Ends with a balance line.
+      • transfers between the bank account and the safe
+    Ends with the opening balance, the movement of the range and the closing
+    balance — the amount that must match the cash counted in the safe.
 
     date_from / date_to are YYYY-MM-DD strings (inclusive).
     """
@@ -936,25 +938,51 @@ def generate_cash_report(date_from, date_to, output_dir=None):
         summary["expense_total"], 3,
     )
 
+    _section(
+        "ДВИЖЕНИЯ МЕЖДУ БАНКА И КАСА",
+        ["Дата", "Движение", "Бележка", "Сума"],
+        summary["transfers"],
+        [_W*0.17, _W*0.28, _W*0.30, _W*0.25],
+        lambda t: [
+            _p(t["date"] or "—", size=9, align=TA_CENTER),
+            _p("Банка → Каса" if t["direction"] == "bank_to_cash" else "Каса → Банка", size=9),
+            _p(t["note"] or "—", size=9),
+            # Signed from the safe's point of view: + goes in, − goes out
+            _p(("+" if t["direction"] == "bank_to_cash" else "−") + _fmt(t["amount"]),
+               size=9, align=TA_RIGHT),
+        ],
+        summary["transfer_in"] - summary["transfer_out"], 3,
+    )
+
     bal_rows = [
+        [_p("Наличност в касата в началото:", bold=True, size=10),
+         _p(_fmt(summary["opening_balance"]), bold=True, size=10, align=TA_RIGHT)],
         [_p("Общо постъпили в брой:", bold=True, size=10),
          _p(_fmt(summary["total_in"]), bold=True, size=10, align=TA_RIGHT)],
+        [_p("Изтеглено от банката в касата:", bold=True, size=10),
+         _p(_fmt(summary["transfer_in"]), bold=True, size=10, align=TA_RIGHT)],
         [_p("Общо разходи в брой:", bold=True, size=10),
          _p(_fmt(summary["expense_total"]), bold=True, size=10, align=TA_RIGHT)],
-        [_p("КАСОВ БАЛАНС:", bold=True, size=11),
-         _p(_fmt(summary["balance"]), bold=True, size=11, align=TA_RIGHT)],
+        [_p("Внесено от касата в банката:", bold=True, size=10),
+         _p(_fmt(summary["transfer_out"]), bold=True, size=10, align=TA_RIGHT)],
+        [_p("НАЛИЧНОСТ В КАСАТА В КРАЯ:", bold=True, size=11),
+         _p(_fmt(summary["closing_balance"]), bold=True, size=11, align=TA_RIGHT)],
     ]
+    _last = len(bal_rows) - 1
     bal_style = _ts(
-        ("LINEABOVE", (0, 2), (-1, 2), 1.5, _BLACK),
-        ("LINEBELOW", (0, 2), (-1, 2), 1.5, _BLACK),
-        ("BACKGROUND",(0, 2), (-1, 2), _LIGHT),
+        ("LINEABOVE", (0, _last), (-1, _last), 1.5, _BLACK),
+        ("LINEBELOW", (0, _last), (-1, _last), 1.5, _BLACK),
+        ("BACKGROUND",(0, _last), (-1, _last), _LIGHT),
     )
-    story.append(Table(bal_rows, colWidths=[_CL, _CR], style=bal_style))
-
-    story.append(Spacer(1, 1.0*cm))
-    story.append(_p("Касиер: &nbsp;.............................................",
-                    size=10, before=4, after=2))
-    story.append(_p("(подпис)", size=8, color=_GREY, after=4))
+    # The balance block and the cashier's signature belong on one page — a
+    # closing balance split across a page break is unreadable at a glance.
+    story.append(KeepTogether([
+        Table(bal_rows, colWidths=[_CL, _CR], style=bal_style),
+        Spacer(1, 1.0*cm),
+        _p("Касиер: &nbsp;.............................................",
+           size=10, before=4, after=2),
+        _p("(подпис)", size=8, color=_GREY, after=4),
+    ]))
 
     doc.build(story, onFirstPage=_draw_footer, onLaterPages=_draw_footer)
     return filepath

@@ -372,6 +372,56 @@ def api_delete_transaction(fid):
     core.delete_transaction(fid)
     return jsonify({"ok": True})
 
+# ── Bank ↔ safe transfers ─────────────────────────────────────
+# Moving money between the bank account and the building safe is neither
+# income nor an expense — it gets its own endpoints so it never lands in the
+# income/expense totals.
+DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def req_date(d, key, label=None):
+    v = req_text(d, key, label)
+    if not DATE_RE.match(v):
+        raise BadRequest(f"Полето „{_label(key, label)}“ трябва да е дата (ГГГГ-ММ-ДД)")
+    return v
+
+
+@app.route("/api/finance/transfers")
+def api_transfers():
+    rows = core.get_cash_transfers(request.args.get("date_from"),
+                                   request.args.get("date_to"))
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route("/api/finance/transfers", methods=["POST"])
+def api_add_transfer():
+    d = body()
+    amount = req_num(d, "amount", "Сума")
+    if amount <= 0:
+        raise BadRequest("Сумата трябва да е положителна")
+    try:
+        tid = core.add_cash_transfer(
+            req_date(d, "date", "Дата"),
+            amount,
+            one_of(d, "direction", core.TRANSFER_DIRECTIONS, "Посока"),
+            opt_text(d, "note"),
+        )
+    except ValueError as e:
+        raise BadRequest(str(e))
+    return jsonify({"id": tid})
+
+
+@app.route("/api/finance/transfers/<int:tid>", methods=["DELETE"])
+def api_delete_transfer(tid):
+    core.delete_cash_transfer(tid)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/finance/cash-balance")
+def api_cash_balance():
+    return jsonify(core.get_cash_balance(request.args.get("as_of")))
+
+
 @app.route("/api/finance/categories")
 def api_categories():
     type_filter = request.args.get("type")

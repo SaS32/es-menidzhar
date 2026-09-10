@@ -3,6 +3,8 @@ let _finPeriod = "";
 let _categories = [];
 let _fees = [];      // current period fee rows — looked up by id from onclick handlers
 let _advances = [];  // advance payment rows — looked up by id from onclick handlers
+let _transfers = []; // bank ↔ safe transfers for the selected period
+let _finTab = "tab-fees";  // active tab — restored after every reload
 
 function initFinancePage() {
   const periods = buildPeriods(24);
@@ -36,6 +38,20 @@ function _pmLabel(pm) {
   return pm === "cash" ? "В брой" : "По банка";
 }
 
+function _trLabel(dir) {
+  return dir === "bank_to_cash"
+    ? "Банка → Каса"
+    : "Каса → Банка";
+}
+
+// The first and last day of a YYYY-MM period — transfers are dated, not
+// period-tagged, so the page filters them by the selected month's date range.
+function _periodRange(p) {
+  const [y, m] = p.split("-").map(Number);
+  const last = new Date(y, m, 0).getDate();
+  return [`${p}-01`, `${p}-${String(last).padStart(2, "0")}`];
+}
+
 // Move the period select one entry forward/back (+1 = older month, −1 = newer)
 function shiftPeriod(delta) {
   const sel = document.getElementById("finPeriod");
@@ -47,24 +63,29 @@ function shiftPeriod(delta) {
 }
 
 async function loadFinancePage() {
-  const [categories, summary, fees, expenses, income, advances, fs] = await Promise.all([
-    api.get("/api/finance/categories"),
-    api.get(`/api/finance/summary/${_finPeriod}`),
-    api.get(`/api/finance/fees/${_finPeriod}`),
-    api.get(`/api/finance/transactions?period=${_finPeriod}&type=expense`),
-    api.get(`/api/finance/transactions?period=${_finPeriod}&type=income`),
-    api.get("/api/finance/advance-payments"),
-    api.get("/api/finance/fee-settings"),
-  ]);
+  const [dFrom, dTo] = _periodRange(_finPeriod);
+  const [categories, summary, fees, expenses, income, advances, fs, transfers, cash] =
+    await Promise.all([
+      api.get("/api/finance/categories"),
+      api.get(`/api/finance/summary/${_finPeriod}`),
+      api.get(`/api/finance/fees/${_finPeriod}`),
+      api.get(`/api/finance/transactions?period=${_finPeriod}&type=expense`),
+      api.get(`/api/finance/transactions?period=${_finPeriod}&type=income`),
+      api.get("/api/finance/advance-payments"),
+      api.get("/api/finance/fee-settings"),
+      api.get(`/api/finance/transfers?date_from=${dFrom}&date_to=${dTo}`),
+      api.get("/api/finance/cash-balance"),
+    ]);
   _categories = categories;
   _fees = fees;
   _advances = advances;
+  _transfers = transfers;
 
   const bal = summary.balance;
 
   document.getElementById("finBody").innerHTML = `
     <!-- KPI -->
-    <div class="kpi-grid">
+    <div class="kpi-grid" style="grid-template-columns:repeat(4,1fr)">
       <div class="kpi-card">
         <div class="kpi-label">Общо приходи</div>
         <div class="kpi-value green">${fmt(summary.total_income)}</div>
@@ -77,17 +98,22 @@ async function loadFinancePage() {
         <div class="kpi-label">Баланс</div>
         <div class="kpi-value ${bal >= 0 ? 'green' : 'red'}">${fmtSign(bal)}</div>
       </div>
+      <div class="kpi-card">
+        <div class="kpi-label">В касата (към днес)</div>
+        <div class="kpi-value ${cash.balance >= 0 ? 'green' : 'red'}">${fmt(cash.balance)}</div>
+      </div>
     </div>
 
     <!-- Tabs -->
     <div class="card">
       <div class="tabs">
-        <button class="tab-btn active" onclick="switchFinTab(this,'tab-fees')">Такси</button>
-        <button class="tab-btn" onclick="switchFinTab(this,'tab-expenses')">Разходи</button>
-        <button class="tab-btn" onclick="switchFinTab(this,'tab-income')">Приходи</button>
-        <button class="tab-btn" onclick="switchFinTab(this,'tab-advances')">Аванси${advances.length ? ` <span class="badge badge-blue" style="margin-left:4px">${advances.length}</span>` : ''}</button>
-        <button class="tab-btn" onclick="switchFinTab(this,'tab-cats')">По категории</button>
-        <button class="tab-btn" onclick="switchFinTab(this,'tab-catmgr')">Управление категории</button>
+        <button class="tab-btn active" data-tab="tab-fees" onclick="switchFinTab(this,'tab-fees')">Такси</button>
+        <button class="tab-btn" data-tab="tab-expenses" onclick="switchFinTab(this,'tab-expenses')">Разходи</button>
+        <button class="tab-btn" data-tab="tab-income" onclick="switchFinTab(this,'tab-income')">Приходи</button>
+        <button class="tab-btn" data-tab="tab-advances" onclick="switchFinTab(this,'tab-advances')">Аванси${advances.length ? ` <span class="badge badge-blue" style="margin-left:4px">${advances.length}</span>` : ''}</button>
+        <button class="tab-btn" data-tab="tab-cash" onclick="switchFinTab(this,'tab-cash')">Каса</button>
+        <button class="tab-btn" data-tab="tab-cats" onclick="switchFinTab(this,'tab-cats')">По категории</button>
+        <button class="tab-btn" data-tab="tab-catmgr" onclick="switchFinTab(this,'tab-catmgr')">Управление категории</button>
       </div>
 
       <!-- Fees tab -->
@@ -211,6 +237,46 @@ async function loadFinancePage() {
         </div>
       </div>
 
+      <!-- Safe / bank transfers tab -->
+      <div class="tab-content" id="tab-cash">
+        <div class="flex-between" style="margin-bottom:12px">
+          <div class="text-muted text-sm">
+            В касата към днес: <strong style="color:${cash.balance >= 0 ? 'var(--green)' : 'var(--red)'}">${fmt(cash.balance)}</strong>
+            · Изтеглено от банка (общо): <strong>${fmt(cash.transfer_in)}</strong>
+            · Внесено в банка (общо): <strong>${fmt(cash.transfer_out)}</strong>
+          </div>
+          <div style="display:flex;gap:8px">
+            <button class="btn btn-primary btn-sm" onclick="addTransfer('bank_to_cash')">↓ Теглене от банка</button>
+            <button class="btn btn-secondary btn-sm" onclick="addTransfer('cash_to_bank')">↑ Внасяне в банка</button>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Дата</th><th>Движение</th><th>Бележка</th><th>Сума</th><th></th></tr></thead>
+            <tbody>
+              ${transfers.length ? transfers.map(t => `
+                <tr>
+                  <td class="muted">${esc(t.date)}</td>
+                  <td>${_trLabel(t.direction)}</td>
+                  <td>${esc(t.note)}</td>
+                  <td style="font-weight:600;color:${t.direction === 'bank_to_cash' ? 'var(--green)' : 'var(--red)'}">${fmtSign(t.direction === 'bank_to_cash' ? t.amount : -t.amount)}</td>
+                  <td><button class="btn btn-danger btn-sm btn-icon" onclick="delTransfer(${t.id})">✕</button></td>
+                </tr>`).join("") :
+                `<tr><td colspan="5" style="text-align:center;padding:24px;color:var(--text4)">Няма движения между банка и каса за периода</td></tr>`}
+            </tbody>
+          </table>
+        </div>
+        <div class="totals-bar">
+          <span>Изтеглено този месец: <strong style="color:var(--green)">${fmt(transfers.filter(t=>t.direction==='bank_to_cash').reduce((s,t)=>s+t.amount,0))}</strong></span>
+          <span>Внесено този месец: <strong style="color:var(--red)">${fmt(transfers.filter(t=>t.direction==='cash_to_bank').reduce((s,t)=>s+t.amount,0))}</strong></span>
+        </div>
+        <div class="text-muted text-sm" style="margin-top:10px;line-height:1.5">
+          Прехвърлянето между банка и каса не е приход и не е разход — парите са
+          същите, сменя се само мястото им. Затова тези движения не влизат в
+          „Общо приходи“ и „Общо разходи“, а само в касовата наличност.
+        </div>
+      </div>
+
       <!-- By category tab -->
       <div class="tab-content" id="tab-cats">
         <div class="table-wrap">
@@ -266,6 +332,8 @@ async function loadFinancePage() {
         </div>
       </div>
     </div>`;
+
+  _restoreFinTab();
 }
 
 function addCategory() {
@@ -300,6 +368,14 @@ function switchFinTab(btn, tabId) {
   document.querySelectorAll("#page-finance .tab-content").forEach(t => t.classList.remove("active"));
   btn.classList.add("active");
   document.getElementById(tabId).classList.add("active");
+  _finTab = tabId;
+}
+
+// The page is re-rendered after every save, which would otherwise drop the
+// reader back onto "Такси" — put them back where they were.
+function _restoreFinTab() {
+  const btn = document.querySelector(`#page-finance .tab-btn[data-tab="${_finTab}"]`);
+  if (btn) switchFinTab(btn, _finTab);
 }
 
 async function generateFees() {
@@ -392,6 +468,39 @@ function addTransaction(type) {
     });
     closeModal(); loadFinancePage(); toast("Записано", "success");
   });
+}
+
+function addTransfer(direction) {
+  const toCash = direction === "bank_to_cash";
+  const today  = new Date().toISOString().slice(0, 10);
+
+  openModal(toCash ? "Теглене от банка в касата" : "Внасяне от касата в банка", `
+    <div class="form-grid">
+      <div class="form-group"><label>Сума</label><input id="trAmt" inputmode="decimal" placeholder="0,00"></div>
+      <div class="form-group"><label>Дата</label><input id="trDate" type="date" value="${today}"></div>
+      <div class="form-group full"><label>Бележка</label>
+        <input id="trNote" placeholder="${toCash ? 'напр. теглене за ремонт на асансьора' : 'напр. внасяне на събрани такси'}">
+      </div>
+      <div class="form-group full text-muted text-sm" style="line-height:1.5">
+        ${toCash
+          ? "Парите излизат от банковата сметка и влизат в касата на входа."
+          : "Парите излизат от касата на входа и влизат в банковата сметка."}
+        Движението не е приход и не е разход — общите приходи и разходи остават непроменени.
+      </div>
+    </div>`, async () => {
+    const amount = formFloat("trAmt");
+    if (amount <= 0) { toast("Въведете положителна сума", "error"); return; }
+    await api.post("/api/finance/transfers", {
+      amount, date: formVal("trDate"), direction, note: formVal("trNote")
+    });
+    closeModal(); loadFinancePage(); toast("Записано", "success");
+  });
+}
+
+async function delTransfer(id) {
+  if (!await confirmDialog("Изтриване на движението между банка и каса?")) return;
+  await api.del(`/api/finance/transfers/${id}`);
+  loadFinancePage(); toast("Изтрито", "success");
 }
 
 async function delTransaction(id) {
