@@ -24,7 +24,7 @@
 
 def calculate_apartment_fee(fixed_fee, residents_count, per_resident_fee,
                             dogs, dog_fee, uses_elevator=1, elevator_fee=0):
-    """Return the calculated monthly fee (лв) for one apartment.
+    """Return the calculated monthly fee (€) for one apartment.
 
     Formula
     ───────
@@ -63,8 +63,8 @@ def calculate_apartment_fee(fixed_fee, residents_count, per_resident_fee,
     If the fee setting values look wrong, check fee_settings.valid_from —
     the system picks the row with the largest valid_from that is ≤ the period.
     """
-    resident_charge = residents_count * per_resident_fee  # e.g. 2 residents × 5 лв = 10 лв
-    dog_charge      = dogs * dog_fee                      # e.g. 1 dog      × 3 лв =  3 лв
+    resident_charge = residents_count * per_resident_fee  # e.g. 2 residents × 5 € = 10 €
+    dog_charge      = dogs * dog_fee                      # e.g. 1 dog      × 3 € =  3 €
     elevator_charge = elevator_fee if uses_elevator else 0
     total           = fixed_fee + resident_charge + dog_charge + elevator_charge
     return total

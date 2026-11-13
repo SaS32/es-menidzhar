@@ -15,6 +15,7 @@ function initDashboardPage() {
 
 async function loadDashboard() {
   const d = await api.get("/api/dashboard");
+  if (d.apt_count === 0) { renderFirstRun(); return; }
   const monthLbl = periodLabel(d.period);
   const monthIncome = d.month_collected + d.month_other_income;
 
@@ -71,11 +72,34 @@ async function loadDashboard() {
         <div class="kpi-label">Разходи · ${esc(monthLbl)}</div>
         <div class="kpi-value red">${fmt(d.month_expenses)}</div>
       </div>
-      <div class="kpi-card">
-        <div class="kpi-label">Наличен аванс</div>
-        <div class="kpi-value accent">${fmt(d.advance_total)}</div>
-        <div class="text-sm text-muted" style="margin-top:4px">${d.apt_count} апартамента · ${d.res_count} живущи</div>
+      <div class="kpi-card" title="Каса + банка към днес, с началното салдо">
+        <div class="kpi-label">Налични средства</div>
+        <div class="kpi-value ${d.total_funds >= 0 ? 'accent' : 'red'}">${fmt(d.total_funds)}</div>
+        <div class="text-sm text-muted" style="margin-top:4px">каса ${fmt(d.cash_balance)} · банка ${fmt(d.bank_balance)}</div>
       </div>
     </div>
+    <div class="text-sm text-muted" style="margin:-12px 0 20px">
+      ${d.apt_count} апартамента · ${d.res_count} живущи · предплатен аванс от собственици: ${fmt(d.advance_total)}
+    </div>
     ${debtorsBlock}`;
+}
+
+// Empty database: say what to do first instead of showing four zeros.
+function renderFirstRun() {
+  document.getElementById("dashBody").innerHTML = `
+    <div class="card" style="max-width:640px">
+      <div class="card-header"><div class="card-title">Добре дошли — три стъпки до първите такси</div></div>
+      <div class="card-body" style="font-size:14px;line-height:1.7">
+        <ol style="margin:0 0 16px;padding-left:20px">
+          <li><strong>Въведете апартаментите</strong> — един по един или всички наведнъж с „Импорт“ от Excel.</li>
+          <li><strong>Задайте таксите</strong> — „Финанси“ → „⚙ Такси“.</li>
+          <li><strong>Генерирайте таксите за месеца</strong> — „Финанси“ → „Генерирай таксите“.</li>
+        </ol>
+        <div class="text-muted text-sm" style="margin-bottom:16px">
+          Ако входът вече има пари в касата или в банката, въведете ги като
+          начално салдо: „Финанси“ → „Каса“ → „Начално салдо“.
+        </div>
+        <button class="btn btn-primary" onclick="switchPage('apartments')">Към апартаментите →</button>
+      </div>
+    </div>`;
 }

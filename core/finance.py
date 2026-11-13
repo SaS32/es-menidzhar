@@ -1,4 +1,4 @@
-from .database import get_connection, audit
+from .database import get_connection, audit, NotFound, get_setting, set_setting
 from .accounting import (
     calculate_apartment_fee,
     calculate_final_amount,
@@ -39,6 +39,22 @@ def add_category(name, group_name, type_="expense"):
     conn.close()
 
 
+def update_category(cat_id, name, group_name):
+    """Rename a category / move it to another group. Existing transactions
+    follow automatically — they point at the category by id."""
+    conn = get_connection()
+    old = conn.execute("SELECT * FROM expense_categories WHERE id=?", (cat_id,)).fetchone()
+    if old is None:
+        conn.close()
+        raise NotFound("Категорията не е намерена")
+    conn.execute("UPDATE expense_categories SET name=?, group_name=? WHERE id=?",
+                 (name, group_name, cat_id))
+    audit("expense_categories", cat_id, "UPDATE", old_value=dict(old),
+          new_value=f"{name}/{group_name}", conn=conn)
+    conn.commit()
+    conn.close()
+
+
 def delete_category(cat_id):
     conn = get_connection()
     conn.execute("UPDATE expense_categories SET is_active=0 WHERE id=?", (cat_id,))
@@ -53,6 +69,21 @@ def get_current_fee_settings():
     row = conn.execute(
         "SELECT * FROM fee_settings ORDER BY valid_from DESC LIMIT 1"
     ).fetchone()
+    conn.close()
+    return row
+
+
+def get_fee_settings_for(period):
+    """The settings row that applies to a period (YYYY-MM): the newest one
+    whose valid_from is not after it. Falls back to the oldest row for periods
+    that predate every setting."""
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT * FROM fee_settings WHERE valid_from <= ? ORDER BY valid_from DESC LIMIT 1",
+        (period,)).fetchone()
+    if row is None:
+        row = conn.execute(
+            "SELECT * FROM fee_settings ORDER BY valid_from ASC LIMIT 1").fetchone()
     conn.close()
     return row
 
@@ -113,7 +144,17 @@ def generate_monthly_fees(period, regenerate=False):
     """
     conn = get_connection()
 
+    # Manual corrections on the rows about to be rebuilt are carried over —
+    # a discount agreed for the month must not vanish because the resident
+    # count was refreshed.
+    kept_adjustments = {}
     if regenerate:
+        for r in conn.execute(
+                "SELECT apt_id, adjustment, adjustment_note FROM monthly_fees "
+                "WHERE period=? AND status='pending'", (period,)):
+            if r["adjustment"] or r["adjustment_note"]:
+                kept_adjustments[r["apt_id"]] = (r["adjustment"] or 0.0,
+                                                 r["adjustment_note"])
         conn.execute("DELETE FROM monthly_fees WHERE period=? AND status='pending'", (period,))
         conn.commit()
 
@@ -132,6 +173,7 @@ def generate_monthly_fees(period, regenerate=False):
                COUNT(DISTINCT r.id) FILTER (WHERE r.active=1) AS res_count
         FROM apartments a
         LEFT JOIN residents r ON r.apt_id = a.id
+        WHERE a.archived_at IS NULL
         GROUP BY a.id
     """).fetchall()
 
@@ -163,15 +205,16 @@ def generate_monthly_fees(period, regenerate=False):
         )
 
         # Step 5 – persist the fee row; final_amount starts equal to calculated_amount
+        adj, adj_note = kept_adjustments.get(apt["id"], (0.0, None))
         conn.execute("""
             INSERT INTO monthly_fees
               (apt_id, period, residents_count, has_dog, uses_elevator,
                fixed_fee, per_resident_fee, dog_fee, elevator_fee,
-               calculated_amount, final_amount, status)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,'pending')
+               calculated_amount, adjustment, adjustment_note, final_amount, status)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'pending')
         """, (apt["id"], period, res, dogs, elev,
               fs["fixed_fee"], fs["per_resident_fee"], fs["dog_fee"], elev_fee,
-              amount, amount))
+              amount, adj, adj_note, calculate_final_amount(amount, adj)))
         created += 1
 
     conn.execute(
@@ -195,7 +238,7 @@ def get_monthly_fees(period):
         FROM monthly_fees mf
         JOIN apartments a ON a.id = mf.apt_id
         WHERE mf.period = ?
-        ORDER BY CAST(a.number AS INTEGER)
+        ORDER BY a.number NOT GLOB '[0-9]*', CAST(a.number AS INTEGER), a.number
     """, (period,)).fetchall()
     conn.close()
     return rows
@@ -216,7 +259,7 @@ def get_monthly_fees_range(period_from, period_to):
         FROM monthly_fees mf
         JOIN apartments a ON a.id = mf.apt_id
         WHERE mf.period BETWEEN ? AND ?
-        ORDER BY mf.period ASC, CAST(a.number AS INTEGER)
+        ORDER BY mf.period ASC, a.number NOT GLOB '[0-9]*', CAST(a.number AS INTEGER), a.number
     """, (period_from, period_to)).fetchall()
     conn.close()
     return rows
@@ -241,6 +284,9 @@ def update_monthly_fee(fee_id, adjustment, adjustment_note, status, paid_date, p
     """
     conn = get_connection()
     old   = conn.execute("SELECT * FROM monthly_fees WHERE id=?", (fee_id,)).fetchone()
+    if old is None:
+        conn.close()
+        raise NotFound("Таксата не е намерена")
     # All math delegated to accounting.py — do not add formulas here
     final  = calculate_final_amount(old["calculated_amount"], adjustment)
     credit = old["credit_applied"] or 0.0
@@ -264,6 +310,65 @@ def update_monthly_fee(fee_id, adjustment, adjustment_note, status, paid_date, p
           new_value=f"status={new_status},final={final},paid={paid},pm={pm}", conn=conn)
     conn.commit()
     conn.close()
+
+
+def pay_fee(fee_id, amount, date, payment_method="bank"):
+    """Record money received against one fee — the everyday action.
+
+    • The first payment on a fee is stored on the fee row itself
+      (paid_amount, paid_date, payment_method).
+    • A later instalment is booked as an advance payment and applied to this
+      fee straight away. A fee row has room for only ONE date and ONE payment
+      method, so adding to it would re-date the first instalment (or relabel
+      cash as bank) and the safe balance would drift. The advance row keeps
+      each instalment's own date and method.
+    • Anything above what is owed becomes advance credit for the apartment and
+      is applied to its other unpaid months.
+
+    Returns {"applied": paid towards this fee, "advance": surplus kept as credit}.
+    """
+    amount = round(float(amount), 2)
+    if amount <= 0:
+        raise ValueError("Сумата трябва да е положителна")
+    conn = get_connection()
+    fee = conn.execute("SELECT * FROM monthly_fees WHERE id=?", (fee_id,)).fetchone()
+    if fee is None:
+        conn.close()
+        raise NotFound("Таксата не е намерена")
+    final  = fee["final_amount"] or 0.0
+    paid   = fee["paid_amount"] or 0.0
+    credit = fee["credit_applied"] or 0.0
+    owed   = round(final - paid, 2)
+    if owed <= EPSILON:
+        conn.close()
+        raise ValueError("Таксата вече е платена изцяло")
+
+    to_fee = round(min(amount, owed), 2)
+    excess = round(amount - to_fee, 2)
+    manual = round(paid - credit, 2)
+
+    if manual <= EPSILON:
+        new_paid = round(paid + to_fee, 2)
+        status, paid_date = derive_fee_status(final, new_paid, date)
+        conn.execute(
+            "UPDATE monthly_fees SET paid_amount=?, status=?, paid_date=?, payment_method=? WHERE id=?",
+            (new_paid, status, paid_date, payment_method, fee_id))
+        audit("monthly_fees", fee_id, "PAYMENT", old_value=dict(fee),
+              new_value=f"amount={to_fee},date={date},pm={payment_method},status={status}",
+              conn=conn)
+        conn.commit()
+        conn.close()
+    else:
+        conn.close()
+        record_advance_payment(fee["apt_id"], to_fee, date,
+                               f"Доплащане за {fee['period']}", payment_method)
+        apply_credit_to_fee(fee_id)
+
+    if excess > EPSILON:
+        record_advance_payment(fee["apt_id"], excess, date,
+                               f"Надплатено за {fee['period']}", payment_method)
+        apply_credits_for_apartment(fee["apt_id"])
+    return {"applied": to_fee, "advance": excess}
 
 
 # ── Advance payments ──────────────────────────────────────────
@@ -402,31 +507,88 @@ def apply_credits_for_apartment(apt_id):
     return total
 
 
-def update_advance_payment(adv_id, amount, remaining, date, note):
+def update_advance_payment(adv_id, amount, remaining, date, note, payment_method=None):
+    """Correct an advance payment.
+
+    `amount − remaining` is the credit already sitting on fees. The remaining
+    credit may be lowered (e.g. money handed back), but never raised above
+    what is genuinely unused — that would create credit out of nothing while
+    the fees it already paid stay paid.
+    """
     if amount < 0 or remaining < 0:
         raise ValueError("Сумата и остатъкът не могат да са отрицателни")
     if remaining > amount + EPSILON:
         raise ValueError("Остатъкът не може да надвишава сумата на аванса")
     conn = get_connection()
     old = conn.execute("SELECT * FROM advance_payments WHERE id=?", (adv_id,)).fetchone()
+    if old is None:
+        conn.close()
+        raise NotFound("Авансовото плащане не е намерено")
+    used = round((old["amount"] or 0.0) - (old["remaining"] or 0.0), 2)
+    if remaining > round(amount - used, 2) + EPSILON:
+        conn.close()
+        raise ValueError(
+            f"От този аванс вече са приложени {used:.2f} € към такси. "
+            f"При сума {amount:.2f} € остатъкът може да е най-много "
+            f"{max(0.0, amount - used):.2f} €.")
+    pm = payment_method or old["payment_method"] or "bank"
     conn.execute(
-        "UPDATE advance_payments SET amount=?, remaining=?, date=?, note=? WHERE id=?",
-        (amount, remaining, date, note, adv_id)
+        "UPDATE advance_payments SET amount=?, remaining=?, date=?, note=?, payment_method=? WHERE id=?",
+        (amount, remaining, date, note, pm, adv_id)
     )
     audit("advance_payments", adv_id, "UPDATE",
           old_value=dict(old),
-          new_value=f"amount={amount},remaining={remaining},date={date}", conn=conn)
+          new_value=f"amount={amount},remaining={remaining},date={date},pm={pm}", conn=conn)
     conn.commit()
     conn.close()
+
+
+def _unapply_credit(conn, apt_id, amount):
+    """Take `amount` of applied advance credit back off the apartment's fees,
+    newest month first. Returns how much was actually taken back."""
+    left = round(amount, 2)
+    rows = conn.execute(
+        "SELECT * FROM monthly_fees WHERE apt_id=? AND credit_applied > 0 "
+        "ORDER BY period DESC, id DESC", (apt_id,)).fetchall()
+    for fee in rows:
+        if left <= EPSILON:
+            break
+        take = round(min(fee["credit_applied"], left), 2)
+        new_credit = round(fee["credit_applied"] - take, 2)
+        new_paid   = round(max(0.0, (fee["paid_amount"] or 0.0) - take), 2)
+        status, paid_date = derive_fee_status(fee["final_amount"], new_paid, fee["paid_date"])
+        conn.execute(
+            "UPDATE monthly_fees SET credit_applied=?, paid_amount=?, status=?, paid_date=? WHERE id=?",
+            (new_credit, new_paid, status, paid_date, fee["id"]))
+        audit("monthly_fees", fee["id"], "CREDIT_REVERSED", old_value=dict(fee),
+              new_value=f"reversed={take},new_status={status}", conn=conn)
+        left = round(left - take, 2)
+    return round(amount - left, 2)
 
 
 def delete_advance_payment(adv_id):
+    """Delete an advance payment AND take its credit back off the fees.
+
+    The money is gone from the books, so the fees it had paid become unpaid
+    again (newest month first). Leaving them "paid" would keep fee income
+    that no recorded payment backs up, and the safe balance would be short
+    by exactly that amount.
+
+    Returns the amount of credit that was taken back from fees.
+    """
     conn = get_connection()
     old = conn.execute("SELECT * FROM advance_payments WHERE id=?", (adv_id,)).fetchone()
+    if old is None:
+        conn.close()
+        raise NotFound("Авансовото плащане не е намерено")
+    used = round((old["amount"] or 0.0) - (old["remaining"] or 0.0), 2)
+    reversed_ = _unapply_credit(conn, old["apt_id"], used) if used > EPSILON else 0.0
     conn.execute("DELETE FROM advance_payments WHERE id=?", (adv_id,))
-    audit("advance_payments", adv_id, "DELETE", old_value=dict(old), conn=conn)
+    audit("advance_payments", adv_id, "DELETE", old_value=dict(old),
+          new_value=f"reversed_credit={reversed_}", conn=conn)
     conn.commit()
     conn.close()
+    return reversed_
 
 
 def apply_credits_for_period(period):
@@ -444,7 +606,16 @@ def apply_credits_for_period(period):
 
 
 # ── Expenses & Income ─────────────────────────────────────────
-def add_transaction(type_, amount, date, category_id, description, period, apt_id=None, payment_method="bank"):
+def period_of(date):
+    """YYYY-MM of a YYYY-MM-DD date."""
+    return str(date)[:7]
+
+
+def add_transaction(type_, amount, date, category_id, description, period=None, apt_id=None, payment_method="bank"):
+    # The reporting month always follows the date. They used to be stored
+    # independently, so an expense typed in while browsing March could carry
+    # a November date — in the March report but in November's cash report.
+    period = period_of(date)
     conn = get_connection()
     cur = conn.execute(
         """INSERT INTO finances (apt_id, type, amount, date, category_id, description, period, payment_method)
@@ -482,9 +653,28 @@ def get_transactions(period=None, type_filter=None):
     return rows
 
 
+def update_transaction(fid, amount, date, category_id, description, payment_method="bank"):
+    conn = get_connection()
+    old = conn.execute("SELECT * FROM finances WHERE id=?", (fid,)).fetchone()
+    if old is None:
+        conn.close()
+        raise NotFound("Записът не е намерен")
+    conn.execute(
+        """UPDATE finances SET amount=?, date=?, period=?, category_id=?, description=?,
+           payment_method=? WHERE id=?""",
+        (amount, date, period_of(date), category_id, description, payment_method, fid))
+    audit("finances", fid, "UPDATE", old_value=dict(old),
+          new_value=f"amount={amount},date={date},pm={payment_method}", conn=conn)
+    conn.commit()
+    conn.close()
+
+
 def delete_transaction(fid):
     conn = get_connection()
     old = conn.execute("SELECT * FROM finances WHERE id=?", (fid,)).fetchone()
+    if old is None:
+        conn.close()
+        raise NotFound("Записът не е намерен")
     conn.execute("DELETE FROM finances WHERE id=?", (fid,))
     audit("finances", fid, "DELETE", old_value=dict(old), conn=conn)
     conn.commit()
@@ -550,7 +740,7 @@ def get_period_summary(period_from, period_to):
         FROM monthly_fees mf JOIN apartments a ON a.id=mf.apt_id
         WHERE mf.period BETWEEN ? AND ?
           AND mf.final_amount - mf.paid_amount > 0.005
-        ORDER BY CAST(a.number AS INTEGER), mf.period
+        ORDER BY a.number NOT GLOB '[0-9]*', CAST(a.number AS INTEGER), a.number, mf.period
     """, (period_from, period_to)).fetchall()
 
     conn.close()
@@ -608,7 +798,7 @@ def get_dashboard_data():
         FROM monthly_fees mf JOIN apartments a ON a.id = mf.apt_id
         WHERE mf.final_amount - mf.paid_amount > 0.005
         GROUP BY mf.apt_id
-        ORDER BY owed DESC, CAST(a.number AS INTEGER)
+        ORDER BY owed DESC, a.number NOT GLOB '[0-9]*', CAST(a.number AS INTEGER), a.number
     """).fetchall()
 
     advance_total = conn.execute("""
@@ -617,8 +807,12 @@ def get_dashboard_data():
 
     conn.close()
 
+    funds = get_balances()
     total_owed = round(sum(d["owed"] for d in debtors), 2)
     return {
+        "cash_balance":       funds["cash"],
+        "bank_balance":       funds["bank"],
+        "total_funds":        funds["total"],
         "period":             period,
         "apt_count":          apt_count,
         "res_count":          res_count,
@@ -692,49 +886,52 @@ def delete_cash_transfer(tid):
     conn.close()
 
 
-def _cash_totals(conn, date_from, date_to):
-    """Cash in/out totals for a date range — the arithmetic behind every
-    safe balance. date_from=None means "since the beginning".
+def _method_totals(conn, method, date_from, date_to):
+    """In/out totals of one "place" — 'cash' (the safe) or 'bank' — for a date
+    range. date_from=None means "since the beginning".
 
-    Sources are the same four the cash report lists, plus transfers:
-      • fees paid in cash — the MANUAL portion only (paid_amount − credit_applied);
-        the credit portion was already counted when the advance was received
-      • advance payments received in cash
-      • other cash income / cash expenses from `finances`
-      • bank→safe transfers in, safe→bank transfers out
+    Sources:
+      • fees paid by this method — the MANUAL portion only
+        (paid_amount − credit_applied); the credit portion was already counted
+        when the advance was received
+      • advance payments received by this method
+      • other income / expenses from `finances`
+      • transfers: bank→safe adds to the safe and leaves the bank, and back
     """
     df = date_from or _DATE_MIN
     dt = date_to or "9999-12-31"
 
-    def one(sql):
-        return conn.execute(sql, (df, dt)).fetchone()["t"] or 0.0
+    def one(sql, *extra):
+        return conn.execute(sql, (*extra, df, dt)).fetchone()["t"] or 0.0
 
     fees = one("""
         SELECT COALESCE(SUM(ROUND(paid_amount - credit_applied, 2)),0) AS t
         FROM monthly_fees
-        WHERE payment_method='cash' AND paid_amount - credit_applied > 0.005
+        WHERE COALESCE(payment_method,'bank')=? AND paid_amount - credit_applied > 0.005
           AND paid_date BETWEEN ? AND ?
-    """)
+    """, method)
     advances = one("""
         SELECT COALESCE(SUM(amount),0) AS t FROM advance_payments
-        WHERE payment_method='cash' AND date BETWEEN ? AND ?
-    """)
+        WHERE COALESCE(payment_method,'bank')=? AND date BETWEEN ? AND ?
+    """, method)
     income = one("""
         SELECT COALESCE(SUM(amount),0) AS t FROM finances
-        WHERE type='income' AND payment_method='cash' AND date BETWEEN ? AND ?
-    """)
+        WHERE type='income' AND COALESCE(payment_method,'bank')=? AND date BETWEEN ? AND ?
+    """, method)
     expenses = one("""
         SELECT COALESCE(SUM(amount),0) AS t FROM finances
-        WHERE type='expense' AND payment_method='cash' AND date BETWEEN ? AND ?
-    """)
+        WHERE type='expense' AND COALESCE(payment_method,'bank')=? AND date BETWEEN ? AND ?
+    """, method)
+    into, out_of = (("bank_to_cash", "cash_to_bank") if method == "cash"
+                    else ("cash_to_bank", "bank_to_cash"))
     tr_in = one("""
         SELECT COALESCE(SUM(amount),0) AS t FROM cash_transfers
-        WHERE direction='bank_to_cash' AND date BETWEEN ? AND ?
-    """)
+        WHERE direction=? AND date BETWEEN ? AND ?
+    """, into)
     tr_out = one("""
         SELECT COALESCE(SUM(amount),0) AS t FROM cash_transfers
-        WHERE direction='cash_to_bank' AND date BETWEEN ? AND ?
-    """)
+        WHERE direction=? AND date BETWEEN ? AND ?
+    """, out_of)
 
     total_in = round(fees + advances + income, 2)
     return {
@@ -745,24 +942,64 @@ def _cash_totals(conn, date_from, date_to):
         "transfer_in":     round(tr_in, 2),
         "transfer_out":    round(tr_out, 2),
         "total_in":        total_in,
-        # Net change of the safe over the range
+        # Net change of this place over the range
         "net":             round(total_in + tr_in - expenses - tr_out, 2),
     }
+
+
+def _cash_totals(conn, date_from, date_to):
+    return _method_totals(conn, "cash", date_from, date_to)
+
+
+# ── Opening balances ─────────────────────────────────────────
+# What the association already held on the day the program was first used.
+# Without them the safe would "start" at zero and never match a real count.
+def get_opening_balances(conn=None):
+    def num(key):
+        try:
+            return round(float(get_setting(key, 0, conn=conn) or 0), 2)
+        except (TypeError, ValueError):
+            return 0.0
+    return {"cash": num("opening_cash"), "bank": num("opening_bank")}
+
+
+def set_opening_balances(cash, bank):
+    conn = get_connection()
+    old = get_opening_balances(conn)
+    set_setting("opening_cash", round(float(cash), 2), conn=conn)
+    set_setting("opening_bank", round(float(bank), 2), conn=conn)
+    audit("settings", None, "UPDATE", old_value=f"cash={old['cash']},bank={old['bank']}",
+          new_value=f"opening cash={cash},bank={bank}", conn=conn)
+    conn.commit()
+    conn.close()
 
 
 def get_cash_balance(as_of=None):
     """How much cash the safe holds, counting everything up to `as_of`
     (YYYY-MM-DD, inclusive; None = today and everything recorded).
 
-    Returns the totals dict from _cash_totals with `balance` = the running
-    amount in the safe.
+    Returns the totals dict from _cash_totals with `balance` = opening balance
+    + the running movement.
     """
     conn = get_connection()
     t = _cash_totals(conn, None, as_of)
+    opening = get_opening_balances(conn)["cash"]
     conn.close()
     t["as_of"] = as_of
-    t["balance"] = t["net"]
+    t["opening"] = opening
+    t["balance"] = round(opening + t["net"], 2)
     return t
+
+
+def get_balances(as_of=None):
+    """Where the association's money is: safe, bank account and the total."""
+    conn = get_connection()
+    opening = get_opening_balances(conn)
+    cash = round(opening["cash"] + _method_totals(conn, "cash", None, as_of)["net"], 2)
+    bank = round(opening["bank"] + _method_totals(conn, "bank", None, as_of)["net"], 2)
+    conn.close()
+    return {"cash": cash, "bank": bank, "total": round(cash + bank, 2),
+            "opening_cash": opening["cash"], "opening_bank": opening["bank"]}
 
 
 # ── Cash-only summary (payment_method='cash') ────────────────
@@ -835,7 +1072,8 @@ def get_cash_summary(date_from, date_to):
 
     # Everything already in the safe the day before the range starts
     day_before = (datetime.strptime(date_from, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
-    opening_balance = _cash_totals(conn, None, day_before)["net"]
+    opening_balance = (get_opening_balances(conn)["cash"]
+                       + _cash_totals(conn, None, day_before)["net"])
 
     conn.close()
 
