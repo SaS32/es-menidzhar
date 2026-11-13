@@ -2,7 +2,7 @@
 # Single source of truth for the version number. The UI footer, the PDF
 # reports and the build script all read it from here — do not hard-code the
 # version anywhere else.
-__version__ = "2.5.0"
+__version__ = "2.5.1"
 
 from .paths import RESOURCE_DIR, DATA_DIR, resource, data
 from .database import (
@@ -16,6 +16,7 @@ from .finance import (
     get_current_fee_settings, get_fee_settings_for, get_fee_settings_history,
     save_fee_settings, pay_fee,
     generate_monthly_fees, get_monthly_fees, get_monthly_fees_range, update_monthly_fee,
+    delete_unpaid_fees,
     record_advance_payment, get_advance_payments, get_apt_credit_balance,
     update_advance_payment, delete_advance_payment,
     apply_credit_to_fee, apply_credits_for_apartment, apply_credits_for_period,

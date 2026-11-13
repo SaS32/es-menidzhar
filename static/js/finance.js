@@ -211,6 +211,7 @@ async function loadFinancePage() {
               <span>Само неплатени</span>
             </label>
             <a class="btn btn-secondary btn-sm" href="/api/export/fees/${_finPeriod}.csv" title="Таблицата като файл за Excel">⬇ Excel</a>
+            ${fees.length ? `<button class="btn btn-secondary btn-sm" style="color:var(--red)" onclick="deleteUnpaidFees()" title="Маха таксите за месеца, по които няма плащане — ако са генерирани по грешка">🗑 Изтрий таксите</button>` : ''}
             <button class="btn btn-primary btn-sm" onclick="generateFees()">⟳ Генерирай таксите</button>
           </div>
         </div>
@@ -453,6 +454,32 @@ function _restoreFinTab() {
 }
 
 // ── Fees ──────────────────────────────────────────────────────
+// Undo a generation made by mistake. Only fees with no money on them are
+// deleted; the ones that carry a payment or applied advance stay, because
+// removing them would take received money out of the reports and the safe.
+async function deleteUnpaidFees() {
+  const untouched = f => f.status === "pending" && !(f.paid_amount > 0) && !(f.credit_applied > 0);
+  const doomed = _fees.filter(untouched);
+  const kept = _fees.length - doomed.length;
+  const month = periodLabel(_finPeriod);
+  if (!doomed.length) {
+    toast(`По всички такси за ${month} има плащане — няма какво да се изтрие. ` +
+          "Първо махнете плащането (✎ → „Очаква“ или изтрийте аванса).", "error");
+    return;
+  }
+  const withAdj = doomed.filter(f => f.adjustment || f.adjustment_note).length;
+  const total = doomed.reduce((s, f) => s + f.final_amount, 0);
+  const msg =
+    `Изтриване на неплатените такси за ${month} — ${doomed.length} бр., общо ${fmt(total)}?\n\n` +
+    (kept ? `Такси с плащане или приложен аванс (${kept} бр.) НЕ се изтриват — парите по тях остават в отчетите.\n\n` : "") +
+    (withAdj ? `Ръчните корекции по ${withAdj} от тях ще се загубят.\n\n` : "") +
+    "Таксите могат да се генерират отново по всяко време.";
+  if (!await confirmDialog(msg, { title: "Изтриване на такси", okLabel: "Изтрий таксите" })) return;
+  const r = await api.del(`/api/finance/fees/${_finPeriod}`);
+  loadFinancePage();
+  toast(`Изтрити такси: ${r.deleted}` + (r.kept ? `; запазени с плащане: ${r.kept}` : ""), "success");
+}
+
 async function generateFees() {
   const count = (await api.post(`/api/finance/fees/generate/${_finPeriod}`, {})).generated;
   if (count === 0) {
