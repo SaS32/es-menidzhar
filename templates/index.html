@@ -35,6 +35,9 @@
       <button class="nav-btn" data-page="audit" title="Архив">
         <span class="nav-icon">📋</span><span class="nav-label">Архив</span>
       </button>
+      <button class="nav-btn" data-page="backups" title="Резервни копия">
+        <span class="nav-icon">💾</span><span class="nav-label">Копия</span>
+      </button>
       <button class="nav-btn" data-page="help" title="Помощ">
         <span class="nav-icon">❓</span><span class="nav-label">Помощ</span>
       </button>
@@ -50,6 +53,9 @@
       <button class="refresh-btn" id="zoomToggle" onclick="cycleZoom()" style="margin-top:6px" title="Размер на текста">
         Aa · 100%
       </button>
+      <button class="refresh-btn" id="exitBtn" onclick="exitApp()" style="margin-top:6px" title="Спира програмата">
+        ⏻ Изход
+      </button>
       <div class="version" id="appVersion">v{{ version }} · Flask</div>
     </div>
   </aside>
@@ -61,6 +67,7 @@
     <div id="page-finance"    class="page"></div>
     <div id="page-reports"    class="page"></div>
     <div id="page-audit"      class="page"></div>
+    <div id="page-backups"    class="page"></div>
     <div id="page-help"       class="page"></div>
   </main>
 </div>
@@ -70,7 +77,7 @@
   <div class="modal" id="modal">
     <div class="modal-header">
       <h3 id="modalTitle">Диалог</h3>
-      <button class="modal-close" onclick="closeModal()">✕</button>
+      <button class="modal-close" onclick="closeModal()" aria-label="Затвори">✕</button>
     </div>
     <div class="modal-body" id="modalBody"></div>
   </div>
@@ -89,6 +96,7 @@
 <script src="/static/js/finance.js"></script>
 <script src="/static/js/reports.js"></script>
 <script src="/static/js/audit.js"></script>
+<script src="/static/js/backups.js"></script>
 <script src="/static/js/help.js"></script>
 <script src="/static/js/app.js"></script>
 </body>

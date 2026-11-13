@@ -2,9 +2,10 @@ import sqlite3
 from .database import get_connection, audit, NotFound
 from datetime import datetime
 
-# Apartment numbers are text ("12", "12А", "Магазин 1"): sort numerically
-# first, then by the text itself so non-numeric ones keep a stable order.
-APT_ORDER = "CAST(a.number AS INTEGER), a.number"
+# Apartment numbers are text ("12", "12А", "Магазин 1"): numbered ones first in
+# numeric order ("2" before "10", "2А" right after "2"), then the named ones
+# (shops, studios) alphabetically.
+APT_ORDER = "a.number NOT GLOB '[0-9]*', CAST(a.number AS INTEGER), a.number"
 
 _DUPLICATE_NUMBER = ("Вече има апартамент с този номер "
                      "(проверете и архивираните апартаменти)")
@@ -293,17 +294,36 @@ def get_owner(apt_id):
     return row
 
 
+def _same_person(a, b):
+    return bool(a) and bool(b) and " ".join(a.split()).casefold() == " ".join(b.split()).casefold()
+
+
+def _owner_resident_row(conn, apt_id, *names):
+    """The resident row that IS the owner: the one with role 'owner', or —
+    for data typed in before the two were linked — a resident carrying the
+    owner's name (it is adopted instead of creating a duplicate)."""
+    rows = conn.execute(
+        "SELECT * FROM residents WHERE apt_id=? ORDER BY active DESC, id", (apt_id,)).fetchall()
+    for r in rows:
+        if r["role"] == "owner":
+            return r
+    for r in rows:
+        if any(_same_person(r["full_name"], n) for n in names):
+            return r
+    return None
+
+
 def owner_is_resident(apt_id):
-    """True if the owner is also listed as an ACTIVE resident (role 'owner')."""
+    """True if the owner is also listed as an ACTIVE resident."""
     conn = get_connection()
-    row = conn.execute(
-        "SELECT 1 FROM residents WHERE apt_id=? AND role='owner' AND active=1 LIMIT 1",
-        (apt_id,)).fetchone()
+    owner = conn.execute("SELECT full_name FROM owners WHERE apt_id=? LIMIT 1",
+                         (apt_id,)).fetchone()
+    row = _owner_resident_row(conn, apt_id, owner["full_name"] if owner else None)
     conn.close()
-    return row is not None
+    return row is not None and bool(row["active"])
 
 
-def _sync_owner_resident(conn, apt_id, full_name, egn, phone, email, lives_here):
+def _sync_owner_resident(conn, apt_id, full_name, egn, phone, email, lives_here, old_name=None):
     """Keep the owner's own row in `residents` in step with the owner record.
 
     The owner is entered ONCE. If they live in the apartment, a resident row
@@ -312,14 +332,12 @@ def _sync_owner_resident(conn, apt_id, full_name, egn, phone, email, lives_here)
     not live there, that row is switched to inactive (never deleted — it may
     carry history) and stops counting.
     """
-    row = conn.execute(
-        "SELECT * FROM residents WHERE apt_id=? AND role='owner' ORDER BY active DESC, id LIMIT 1",
-        (apt_id,)).fetchone()
+    row = _owner_resident_row(conn, apt_id, old_name, full_name)
     if lives_here:
         if row:
             conn.execute(
                 """UPDATE residents SET full_name=?, egn=?, phone=?, email=?, active=1,
-                   updated_at=datetime('now') WHERE id=?""",
+                   role='owner', updated_at=datetime('now') WHERE id=?""",
                 (full_name, egn, phone, email, row["id"]))
             audit("residents", row["id"], "UPDATE", old_value=dict(row),
                   new_value=f"name={full_name} (от собственика)", conn=conn)
@@ -363,7 +381,8 @@ def save_owner(apt_id, full_name, egn, phone, email, address, notes, lives_here=
         audit("owners", cur.lastrowid, "CREATE",
               new_value=f"apt_id={apt_id},name={full_name}", conn=conn)
     if lives_here is not None:
-        _sync_owner_resident(conn, apt_id, full_name, egn, phone, email, bool(lives_here))
+        _sync_owner_resident(conn, apt_id, full_name, egn, phone, email, bool(lives_here),
+                             old_name=existing["full_name"] if existing else None)
     _invalidate_verification(conn, apt_id, "собственик")
     conn.commit()
     conn.close()

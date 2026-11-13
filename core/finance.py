@@ -238,7 +238,7 @@ def get_monthly_fees(period):
         FROM monthly_fees mf
         JOIN apartments a ON a.id = mf.apt_id
         WHERE mf.period = ?
-        ORDER BY CAST(a.number AS INTEGER), a.number
+        ORDER BY a.number NOT GLOB '[0-9]*', CAST(a.number AS INTEGER), a.number
     """, (period,)).fetchall()
     conn.close()
     return rows
@@ -259,7 +259,7 @@ def get_monthly_fees_range(period_from, period_to):
         FROM monthly_fees mf
         JOIN apartments a ON a.id = mf.apt_id
         WHERE mf.period BETWEEN ? AND ?
-        ORDER BY mf.period ASC, CAST(a.number AS INTEGER), a.number
+        ORDER BY mf.period ASC, a.number NOT GLOB '[0-9]*', CAST(a.number AS INTEGER), a.number
     """, (period_from, period_to)).fetchall()
     conn.close()
     return rows
@@ -740,7 +740,7 @@ def get_period_summary(period_from, period_to):
         FROM monthly_fees mf JOIN apartments a ON a.id=mf.apt_id
         WHERE mf.period BETWEEN ? AND ?
           AND mf.final_amount - mf.paid_amount > 0.005
-        ORDER BY CAST(a.number AS INTEGER), a.number, mf.period
+        ORDER BY a.number NOT GLOB '[0-9]*', CAST(a.number AS INTEGER), a.number, mf.period
     """, (period_from, period_to)).fetchall()
 
     conn.close()
@@ -798,7 +798,7 @@ def get_dashboard_data():
         FROM monthly_fees mf JOIN apartments a ON a.id = mf.apt_id
         WHERE mf.final_amount - mf.paid_amount > 0.005
         GROUP BY mf.apt_id
-        ORDER BY owed DESC, CAST(a.number AS INTEGER), a.number
+        ORDER BY owed DESC, a.number NOT GLOB '[0-9]*', CAST(a.number AS INTEGER), a.number
     """).fetchall()
 
     advance_total = conn.execute("""

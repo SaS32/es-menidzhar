@@ -5,6 +5,7 @@ const PAGE_INITS = {
   finance:    initFinancePage,
   reports:    initReportsPage,
   audit:      initAuditPage,
+  backups:    initBackupsPage,
   help:       initHelpPage,
 };
 const _initialized = new Set();
@@ -40,6 +41,30 @@ function refreshPage() {
   const btn = document.getElementById("refreshBtn");
   btn.classList.add("flash");
   setTimeout(() => btn.classList.remove("flash"), 400);
+}
+
+// ── Errors nobody caught ──────────────────────────────────────
+// Any failed request that a handler did not deal with ends up here, so the
+// user always sees WHY nothing happened instead of a silent no-op.
+window.addEventListener("unhandledrejection", e => {
+  const msg = e.reason && e.reason.message ? e.reason.message : String(e.reason);
+  toast("Грешка: " + (msg === "Failed to fetch"
+    ? "няма връзка с програмата — работи ли още?" : msg), "error");
+  e.preventDefault();
+});
+
+// ── Exit ──────────────────────────────────────────────────────
+async function exitApp() {
+  if (!await confirmDialog(
+        "Програмата ще спре. Данните са записани.\nЗа да я пуснете отново, стартирайте я както обикновено.",
+        { title: "Изход", okLabel: "Спри програмата" })) return;
+  try { await api.post("/api/shutdown", {}); } catch (_) { /* it may die before answering */ }
+  document.body.innerHTML = `
+    <div style="height:100vh;display:flex;align-items:center;justify-content:center;font-family:sans-serif;text-align:center">
+      <div><div style="font-size:40px;margin-bottom:12px">✓</div>
+      <div style="font-size:18px;font-weight:600">ЕС Мениджър е спрян</div>
+      <div style="margin-top:8px;color:#666">Може да затворите този прозорец.</div></div>
+    </div>`;
 }
 
 // ── Nav click handlers ────────────────────────────────────────

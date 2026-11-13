@@ -77,7 +77,7 @@ function initReportsPage() {
               </div>
               <div style="display:flex;align-items:center;gap:8px">
                 <label style="font-size:13px;color:var(--text3)">До:</label>
-                <input type="date" id="cashTo" value="${new Date().toISOString().slice(0,10)}"
+                <input type="date" id="cashTo" value="${todayISO()}"
                        style="padding:6px 10px;border:1px solid var(--border);border-radius:var(--radius);background:var(--surface2);color:var(--text1);font-size:13px">
               </div>
               <button class="btn btn-primary" id="cashGenBtn" onclick="generateCashReport()">⬇ Генерирай PDF</button>
@@ -228,12 +228,20 @@ const TABLE_LABELS = {
   apartments: "Апартаменти", owners: "Собственици", residents: "Живущи",
   access_chips: "Чипове", finances: "Финанси", monthly_fees: "Месечни такси",
   fee_settings: "Такси настройки", expense_categories: "Категории",
+  advance_payments: "Аванси", cash_transfers: "Каса ↔ банка",
+  settings: "Настройки", database: "База данни",
 };
 const ACTION_BADGES = {
   CREATE:   '<span class="badge badge-green">CREATE</span>',
   UPDATE:   '<span class="badge badge-blue">UPDATE</span>',
   DELETE:   '<span class="badge badge-red">DELETE</span>',
   GENERATE: '<span class="badge badge-amber">GENERATE</span>',
+  PAYMENT:  '<span class="badge badge-green">ПЛАЩАНЕ</span>',
+  ARCHIVE:  '<span class="badge badge-amber">АРХИВИРАН</span>',
+  RESTORE:  '<span class="badge badge-blue">ВЪЗСТАНОВЕН</span>',
+  IMPORT:   '<span class="badge badge-green">ИМПОРТ</span>',
+  CREDIT_APPLIED:  '<span class="badge badge-blue">АВАНС ПРИЛОЖЕН</span>',
+  CREDIT_REVERSED: '<span class="badge badge-red">АВАНС ВЪРНАТ</span>',
 };
 
 let _auditRows = [];

@@ -30,9 +30,13 @@ function openModal(title, bodyHTML, onSave) {
 
     // Guard against double-submit: disable while the save is in flight
     const saveBtn = document.getElementById("modalSaveBtn");
+    // A save that fails must say so: the server's reason goes into a toast
+    // and the dialog stays open with everything the user typed.
     saveBtn.onclick = async () => {
       saveBtn.disabled = true;
-      try { await onSave(); } finally { saveBtn.disabled = false; }
+      try { await onSave(); }
+      catch (e) { toast("Грешка: " + (e && e.message || e), "error"); }
+      finally { saveBtn.disabled = false; }
     };
     // Enter in any field (except textarea) submits the modal
     body.onkeydown = e => {
@@ -45,8 +49,27 @@ function openModal(title, bodyHTML, onSave) {
     body.onkeydown = null;
   }
 
-  document.getElementById("modalOverlay").classList.add("open");
+  // Typing anything marks the dialog "dirty" — a stray click on the backdrop
+  // then no longer throws the entered data away (see closeModal).
+  _modalDirty = false;
+  body.oninput = () => { _modalDirty = true; };
+
+  const overlay = document.getElementById("modalOverlay");
+  overlay.classList.add("open");
+  document.getElementById("modal").setAttribute("role", "dialog");
+  document.getElementById("modal").setAttribute("aria-modal", "true");
+
+  // Start typing straight away: focus the first field (or the first one
+  // marked data-autofocus), and select its content so it can be overwritten.
+  const first = body.querySelector("[data-autofocus]") ||
+                body.querySelector("input:not([type=checkbox]):not([type=hidden]), select, textarea");
+  if (first) {
+    first.focus();
+    if (first.select && first.type !== "date" && first.type !== "month") first.select();
+  }
 }
+
+let _modalDirty = false;
 
 // ── Confirm dialog (replaces native confirm) ──────────────────
 // Usage: if (!await confirmDialog("Изтриване на записа?")) return;
@@ -78,16 +101,38 @@ function confirmDialog(message, opts = {}) {
   });
 }
 
+// Called three ways: closeModal() from code (always closes), from the ✕ and
+// "Отказ" buttons (always closes), and from a click on the dark backdrop —
+// which is ignored once something has been typed.
 function closeModal(e) {
-  if (e && e.target !== document.getElementById("modalOverlay")) return;
-  document.getElementById("modalOverlay").classList.remove("open");
+  const overlay = document.getElementById("modalOverlay");
+  if (e && e.target !== overlay) return;        // click inside the dialog
+  if (e && _modalDirty) return;                 // backdrop click, unsaved input
+  overlay.classList.remove("open");
+  _modalDirty = false;
+}
+
+// YYYY-MM-DD in LOCAL time. toISOString() is UTC — after midnight in Sofia it
+// still returns yesterday's date.
+function todayISO() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+// Ask the server for a PDF and open it in a new tab.
+async function openGeneratedPdf(url) {
+  const r = await api.post(url, {});
+  window.open(`/api/reports/view/${encodeURIComponent(r.filename)}`, "_blank");
+  return r.filename;
 }
 
 // ── Periods ───────────────────────────────────────────────────
-function buildPeriods(count = 24) {
+// Newest first. `ahead` adds future months in front (fees are often generated
+// and prepaid before the month starts).
+function buildPeriods(count = 24, ahead = 0) {
   const now = new Date();
   const periods = [];
-  for (let i = 0; i < count; i++) {
+  for (let i = -ahead; i < count; i++) {
     let y = now.getFullYear(), m = now.getMonth() + 1 - i;
     while (m <= 0) { m += 12; y--; }
     periods.push(`${y}-${String(m).padStart(2, "0")}`);
