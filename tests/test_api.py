@@ -129,6 +129,14 @@ def test_archive_flow_through_the_api(client, building):
     assert len(client.get("/api/apartments").get_json()) == 2
 
 
+def test_delete_unpaid_fees_through_the_api(client, building):
+    core.generate_monthly_fees("2026-05")
+    r = client.delete("/api/finance/fees/2026-05").get_json()
+    assert (r["deleted"], r["kept"], r["amount"]) == (2, 0, 38.0)
+    assert client.get("/api/finance/fees/2026-05").get_json() == []
+    assert client.delete("/api/finance/fees/2026-13").status_code == 400
+
+
 def test_backups_api(client):
     name = client.post("/api/backups").get_json()["name"]
     assert name in [f["name"] for f in client.get("/api/backups").get_json()["files"]]

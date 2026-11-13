@@ -226,6 +226,38 @@ def generate_monthly_fees(period, regenerate=False):
     return created
 
 
+def delete_unpaid_fees(period):
+    """Undo a fee generation: delete the period's fees that nothing was paid on.
+
+    Only rows with no money behind them go — status 'pending', nothing paid,
+    no advance credit applied. A fee that carries a payment or applied credit
+    is KEPT: deleting it would take received money out of the reports and the
+    safe balance (undo the payment first if the fee really has to go).
+    Manual adjustments on the deleted rows are lost with them.
+
+    Returns {"deleted": n, "kept": n, "amount": billed total of deleted rows}.
+    """
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT id, final_amount, paid_amount, credit_applied, status "
+        "FROM monthly_fees WHERE period=?", (period,)).fetchall()
+    doomed = [r for r in rows
+              if r["status"] == "pending"
+              and (r["paid_amount"] or 0.0) <= EPSILON
+              and (r["credit_applied"] or 0.0) <= EPSILON]
+    amount = round(sum(r["final_amount"] or 0.0 for r in doomed), 2)
+    conn.executemany("DELETE FROM monthly_fees WHERE id=?", [(r["id"],) for r in doomed])
+    kept = len(rows) - len(doomed)
+    if doomed:
+        audit("monthly_fees", None, "DELETE",
+              old_value=f"period={period},count={len(doomed)},amount={amount}",
+              new_value=f"изтрити неплатени такси за периода; запазени с плащане: {kept}",
+              conn=conn)
+    conn.commit()
+    conn.close()
+    return {"deleted": len(doomed), "kept": kept, "amount": amount}
+
+
 def get_monthly_fees(period):
     conn = get_connection()
     rows = conn.execute("""

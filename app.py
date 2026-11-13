@@ -409,6 +409,14 @@ def api_monthly_fees(period):
     rows = core.get_monthly_fees(period)
     return jsonify([dict(r) for r in rows])
 
+@app.route("/api/finance/fees/<period>", methods=["DELETE"])
+def api_delete_unpaid_fees(period):
+    """Undo a generation made by mistake — only fees with no payment go."""
+    if not PERIOD_RE.match(period):
+        raise BadRequest("Периодът трябва да е във формат ГГГГ-ММ")
+    return jsonify({"ok": True, **core.delete_unpaid_fees(period)})
+
+
 @app.route("/api/finance/fees/generate/<period>", methods=["POST"])
 def api_generate_fees(period):
     if not PERIOD_RE.match(period):

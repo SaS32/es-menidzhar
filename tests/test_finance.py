@@ -105,6 +105,32 @@ def test_regenerate_keeps_manual_adjustments(building):
            (-5.0, "отстъпка", 15.0)
 
 
+def test_delete_unpaid_fees_undoes_a_generation_but_keeps_paid_money(building):
+    a1, a2 = building
+    core.generate_monthly_fees("2026-03")
+    core.generate_monthly_fees("2026-04")
+    core.pay_fee(fee_of(a1, "2026-03")["id"], 10.0, "2026-03-05", "cash")   # partial
+    before = core.get_period_summary("2026-03", "2026-03")["fee_income"]
+
+    r = core.delete_unpaid_fees("2026-03")
+    assert r == {"deleted": 1, "kept": 1, "amount": 15.0}
+    left = [dict(f) for f in core.get_monthly_fees("2026-03")]
+    assert [f["apt_id"] for f in left] == [a1]                   # the paid one stays
+    assert core.get_period_summary("2026-03", "2026-03")["fee_income"] == before
+    assert core.get_balances()["cash"] == 10.0
+    assert len(core.get_monthly_fees("2026-04")) == 2            # other months untouched
+
+    # A fee covered by advance credit has money on it too.
+    core.record_advance_payment(a2, 15.0, "2026-04-01", "", "bank")
+    core.apply_credits_for_apartment(a2)
+    assert core.delete_unpaid_fees("2026-04") == {"deleted": 1, "kept": 1, "amount": 23.0}
+    assert fee_of(a2, "2026-04")["status"] == "paid"
+
+    # Nothing left to delete → a no-op, and the month can be generated again.
+    assert core.delete_unpaid_fees("2026-03")["deleted"] == 0
+    assert core.generate_monthly_fees("2026-03") == 1
+
+
 def test_tariff_for_a_period(db):
     core.save_fee_settings("2025-01", 10.0, 5.0, 3.0)
     core.save_fee_settings("2026-06", 12.0, 6.0, 3.0)
