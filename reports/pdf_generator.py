@@ -986,3 +986,194 @@ def generate_cash_report(date_from, date_to, output_dir=None):
 
     doc.build(story, onFirstPage=_draw_footer, onLaterPages=_draw_footer)
     return filepath
+
+
+# ── Per-apartment documents ───────────────────────────────────────────────────
+
+_STATUS_BG = {"paid": "Платено", "partial": "Частично", "pending": "Неплатено"}
+_PM_BG = {"cash": "в брой", "bank": "по банка"}
+
+
+def _period_bg(period):
+    try:
+        y, m = period.split("-")
+        return f"{MONTH_BG[int(m)]} {y}"
+    except (ValueError, IndexError):
+        return period or "—"
+
+
+def _date_bg(iso):
+    """YYYY-MM-DD → DD.MM.YYYY (anything else is returned as is)."""
+    try:
+        return datetime.strptime(iso, "%Y-%m-%d").strftime("%d.%m.%Y")
+    except (TypeError, ValueError):
+        return iso or "—"
+
+
+def _output_dir(output_dir):
+    if not output_dir:
+        from core.paths import data
+        output_dir = data("reports", "generated")
+    os.makedirs(output_dir, exist_ok=True)
+    return output_dir
+
+
+def _safe_name(text):
+    """Apartment numbers are free text — keep file names filesystem-safe."""
+    return "".join(ch if ch.isalnum() else "_" for ch in str(text)) or "x"
+
+
+def generate_apartment_statement(apt_id, output_dir=None):
+    """Statement for one apartment: every month billed, what was paid and what
+    is still owed. Doubles as the notice handed to a debtor.
+    """
+    global _GEN_AT
+    output_dir = _output_dir(output_dir)
+    st = core.get_apartment_statement(apt_id)
+    apt = st["apartment"]
+    number = apt["number"]
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    _GEN_AT  = datetime.now().strftime("%d.%m.%Y %H:%M")
+    filename = f"izvlechenie_ap_{_safe_name(number)}_{today}.pdf"
+    filepath = os.path.join(output_dir, filename)
+    doc = SimpleDocTemplate(
+        filepath, pagesize=A4,
+        topMargin=2*cm, bottomMargin=2.5*cm, leftMargin=2*cm, rightMargin=2*cm,
+        title=f"Извлечение ап. {number}",
+    )
+
+    subtitle = f"Апартамент № {number}"
+    if st["owner_name"]:
+        subtitle += " · " + st["owner_name"]
+    story = [
+        _p("ИЗВЛЕЧЕНИЕ ЗА ТАКСИ И ПЛАЩАНИЯ", bold=True, size=13, align=TA_CENTER, after=4),
+        _p(subtitle, size=10, align=TA_CENTER, color=_GREY, after=10),
+        HRFlowable(width="100%", thickness=1, color=_BLACK),
+        Spacer(1, 0.4*cm),
+    ]
+
+    total_owed = st["total_owed"]
+    summary = [
+        [_p("Общо начислено", size=9), _p(_fmt(st["total_billed"]), size=9, align=TA_RIGHT)],
+        [_p("Общо платено", size=9),   _p(_fmt(st["total_paid"]), size=9, align=TA_RIGHT)],
+        [_p("ДЪЛЖИМО КЪМ ДНЕС", bold=True, size=10),
+         _p(f"{total_owed:.2f} €", bold=True, size=10, align=TA_RIGHT)],
+    ]
+    if st["credit_balance"] > 0.005:
+        summary.append([_p("Неизползван аванс", size=9),
+                        _p(_fmt(st["credit_balance"]), size=9, align=TA_RIGHT)])
+    story.append(Table(summary, colWidths=[_CL, _CR], style=_ts(*_total_row_style(2))))
+    story.append(Spacer(1, 0.5*cm))
+
+    story.append(_p("ТАКСИ ПО МЕСЕЦИ", bold=True, size=10, before=4, after=4))
+    rows = [[_p(h, bold=True, align=TA_CENTER, size=9)
+             for h in ("Месец", "Начислено", "Платено", "Дължимо", "Статус", "Платено на")]]
+    for f in st["fees"]:
+        owed = max(0.0, f["owed"] or 0.0)
+        rows.append([
+            _p(_period_bg(f["period"]), size=9),
+            _p(_fmt(f["final_amount"]), size=9, align=TA_RIGHT),
+            _p(_fmt(f["paid_amount"]), size=9, align=TA_RIGHT),
+            _p(_fmt(owed), size=9, align=TA_RIGHT, bold=owed > 0.005),
+            _p(_STATUS_BG.get(f["status"], f["status"] or "—"), size=9, align=TA_CENTER),
+            _p(_date_bg(f["paid_date"]) if f["paid_date"] else "—", size=9, align=TA_CENTER),
+        ])
+    if not st["fees"]:
+        rows.append([_p("—", size=9, align=TA_CENTER) for _ in range(6)])
+    story.append(Table(
+        rows, colWidths=[_W*0.24, _W*0.15, _W*0.15, _W*0.15, _W*0.15, _W*0.16],
+        style=_ts(*_header_row_style()), repeatRows=1))
+
+    if st["advances"]:
+        story.append(Spacer(1, 0.5*cm))
+        story.append(_p("АВАНСОВИ ПЛАЩАНИЯ", bold=True, size=10, before=4, after=4))
+        rows = [[_p(h, bold=True, align=TA_CENTER, size=9)
+                 for h in ("Дата", "Сума", "Остатък", "Начин", "Бележка")]]
+        for a in st["advances"]:
+            rows.append([
+                _p(_date_bg(a["date"]), size=9, align=TA_CENTER),
+                _p(_fmt(a["amount"]), size=9, align=TA_RIGHT),
+                _p(_fmt(a["remaining"]), size=9, align=TA_RIGHT),
+                _p(_PM_BG.get(a["payment_method"] or "bank", "—"), size=9, align=TA_CENTER),
+                _p(a["note"] or "—", size=9),
+            ])
+        story.append(Table(
+            rows, colWidths=[_W*0.16, _W*0.15, _W*0.15, _W*0.16, _W*0.38],
+            style=_ts(*_header_row_style()), repeatRows=1))
+
+    doc.build(story, onFirstPage=_draw_footer, onLaterPages=_draw_footer)
+    return filepath
+
+
+def generate_fee_receipt(fee_id, output_dir=None):
+    """Receipt (квитанция) for the money received against one monthly fee."""
+    global _GEN_AT
+    output_dir = _output_dir(output_dir)
+
+    conn = core.get_connection()
+    fee = conn.execute("""
+        SELECT mf.*, a.number AS apt_number,
+               (SELECT full_name FROM owners o WHERE o.apt_id = mf.apt_id LIMIT 1) AS owner_name
+        FROM monthly_fees mf JOIN apartments a ON a.id = mf.apt_id
+        WHERE mf.id=?
+    """, (fee_id,)).fetchone()
+    conn.close()
+    if fee is None:
+        raise core.NotFound("Таксата не е намерена")
+    paid = fee["paid_amount"] or 0.0
+    if paid <= 0.005:
+        raise ValueError("По тази такса няма получено плащане — няма за какво да се издаде квитанция")
+
+    final  = fee["final_amount"] or 0.0
+    credit = fee["credit_applied"] or 0.0
+    manual = round(paid - credit, 2)
+    owed   = round(max(0.0, final - paid), 2)
+    number = fee["apt_number"]
+    period = fee["period"]
+    method = _PM_BG.get(fee["payment_method"] or "bank", "")
+
+    _GEN_AT  = datetime.now().strftime("%d.%m.%Y %H:%M")
+    filename = f"kvitancia_ap_{_safe_name(number)}_{period}.pdf"
+    filepath = os.path.join(output_dir, filename)
+    doc = SimpleDocTemplate(
+        filepath, pagesize=A4,
+        topMargin=2*cm, bottomMargin=2.5*cm, leftMargin=2*cm, rightMargin=2*cm,
+        title=f"Квитанция ап. {number} {period}",
+    )
+
+    receipt_no = f"№ {fee_id} / " + datetime.now().strftime("%d.%m.%Y")
+    payer = f"Апартамент № {number}"
+    if fee["owner_name"]:
+        payer += " — " + fee["owner_name"]
+    story = [
+        _p("КВИТАНЦИЯ", bold=True, size=14, align=TA_CENTER, after=2),
+        _p(receipt_no, size=10, align=TA_CENTER, color=_GREY, after=10),
+        HRFlowable(width="100%", thickness=1, color=_BLACK),
+        Spacer(1, 0.5*cm),
+    ]
+    rows = [
+        [_p("Получено от", size=10), _p(payer, bold=True, size=10)],
+        [_p("Основание", size=10),
+         _p("Месечна такса за " + _period_bg(period), size=10)],
+        [_p("Начислена такса", size=10), _p(f"{final:.2f} €", size=10)],
+    ]
+    if manual > 0.005:
+        rows.append([_p("Платено", size=10),
+                     _p(f"{manual:.2f} € {method} на " + _date_bg(fee["paid_date"]), size=10)])
+    if credit > 0.005:
+        rows.append([_p("Покрито от аванс", size=10), _p(f"{credit:.2f} €", size=10)])
+    total_idx = len(rows)
+    rows.append([_p("ОБЩО ПОЛУЧЕНО", bold=True, size=11), _p(f"{paid:.2f} €", bold=True, size=11)])
+    rows.append([_p("Остава за плащане", size=10),
+                 _p(f"{owed:.2f} €" if owed > 0.005 else "няма — таксата е платена изцяло", size=10)])
+    story.append(Table(rows, colWidths=[_W*0.35, _W*0.65],
+                       style=_ts(*_total_row_style(total_idx))))
+    story.append(Spacer(1, 1.6*cm))
+    story.append(Table(
+        [[_p("Получил: ............................", size=10),
+          _p("Платил: ............................", size=10, align=TA_RIGHT)]],
+        colWidths=[_W*0.5, _W*0.5]))
+
+    doc.build(story, onFirstPage=_draw_footer, onLaterPages=_draw_footer)
+    return filepath

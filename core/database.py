@@ -1,5 +1,7 @@
 import sqlite3
 import os
+import re
+from contextlib import contextmanager
 from datetime import datetime
 
 from .paths import DATA_DIR
@@ -14,6 +16,48 @@ def get_connection():
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA busy_timeout = 30000")
     return conn
+
+class NotFound(LookupError):
+    """A record the request refers to does not exist — the API answers 404."""
+
+
+@contextmanager
+def db():
+    """A connection that commits on success, rolls back on error and always
+    closes. Use for new code: `with db() as conn: ...`"""
+    conn = get_connection()
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def get_setting(key, default=None, conn=None):
+    own = conn is None
+    if own:
+        conn = get_connection()
+    row = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+    if own:
+        conn.close()
+    return row["value"] if row else default
+
+
+def set_setting(key, value, conn=None):
+    own = conn is None
+    if own:
+        conn = get_connection()
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES (?,?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (key, None if value is None else str(value)))
+    if own:
+        conn.commit()
+        conn.close()
+
 
 def init_db():
     conn = get_connection()
@@ -32,6 +76,7 @@ def init_db():
         notes TEXT,
         verified_at TEXT,
         verified_by TEXT,
+        archived_at TEXT,
         created_at TEXT DEFAULT (datetime('now')),
         updated_at TEXT DEFAULT (datetime('now'))
     );
@@ -170,6 +215,12 @@ def init_db():
         created_at TEXT DEFAULT (datetime('now'))
     );
 
+    -- Small key/value store: opening balances, the manager's name, etc.
+    CREATE TABLE IF NOT EXISTS settings (
+        key TEXT PRIMARY KEY,
+        value TEXT
+    );
+
     CREATE TABLE IF NOT EXISTS audit_log (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         table_name TEXT NOT NULL,
@@ -234,6 +285,9 @@ def init_db():
         # apartments start unverified, which is the honest default.
         ("apartments", "verified_at", "TEXT"),
         ("apartments", "verified_by", "TEXT"),
+        # Archived apartments keep their financial history but drop out of
+        # the lists and of fee generation. NULL = active.
+        ("apartments", "archived_at", "TEXT"),
     ]:
         existing = [r[1] for r in c.execute(f"PRAGMA table_info({tbl})").fetchall()]
         if col not in existing:
@@ -262,32 +316,133 @@ def init_db():
     c.execute("CREATE INDEX IF NOT EXISTS idx_advance_payments_apt ON advance_payments(apt_id)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_cash_transfers_date ON cash_transfers(date)")
 
+    # ── One-time scrub: older versions wrote ЕГН into the audit log ──
+    for col in ("old_value", "new_value"):
+        rows = c.execute(
+            f"SELECT id, {col} AS v FROM audit_log WHERE {col} LIKE '%''egn'': ''%'"
+        ).fetchall()
+        for r in rows:
+            cleaned = _EGN_IN_TEXT.sub(lambda m: m.group(1) + "'***'", r["v"])
+            if cleaned != r["v"]:
+                c.execute(f"UPDATE audit_log SET {col}=? WHERE id=?", (cleaned, r["id"]))
+
     conn.commit()
     conn.close()
 
 
-def backup_db(keep=30):
-    """Copy the live DB to backups/etazna_YYYY-MM-DD.db (one per day, keep last N)."""
-    import shutil
+# ── Backups ──────────────────────────────────────────────────
+# Copies are made with SQLite's online backup API, not a file copy: the
+# database runs in WAL mode, so the newest pages may sit in etazna.db-wal and
+# a plain copy of etazna.db alone could be stale or torn.
+BACKUP_RE = re.compile(r"^etazna_[0-9A-Za-z_\-]+\.db$")
+
+
+def _backups_dir():
+    d = os.path.join(os.path.dirname(DB_PATH), "backups")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _copy_database(src_path, dst_path):
+    src = sqlite3.connect(src_path, timeout=30)
+    dst = sqlite3.connect(dst_path)
+    try:
+        src.backup(dst)
+    finally:
+        dst.close()
+        src.close()
+
+
+def _prune_backups(keep):
+    d = _backups_dir()
+    old = sorted(f for f in os.listdir(d) if BACKUP_RE.match(f))
+    for f in old[:-keep]:
+        try:
+            os.remove(os.path.join(d, f))
+        except OSError:
+            pass
+
+
+def backup_now(keep=30, tag=None):
+    """Make a timestamped copy right now. Returns the file name, or None if
+    there is no database yet."""
     if not os.path.exists(DB_PATH):
         return None
-    backups_dir = os.path.join(os.path.dirname(DB_PATH), "backups")
-    os.makedirs(backups_dir, exist_ok=True)
+    name = f"etazna_{datetime.now().strftime('%Y-%m-%d_%H%M%S')}{('_' + tag) if tag else ''}.db"
+    _copy_database(DB_PATH, os.path.join(_backups_dir(), name))
+    _prune_backups(keep)
+    return name
+
+
+def list_backups():
+    """Backup files, newest first: [{name, size, modified}]."""
+    d = _backups_dir()
+    out = []
+    for f in sorted((f for f in os.listdir(d) if BACKUP_RE.match(f)), reverse=True):
+        st = os.stat(os.path.join(d, f))
+        out.append({"name": f, "size": st.st_size,
+                    "modified": datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M")})
+    return out
+
+
+def backup_path(name):
+    """Absolute path of a backup file, or None if the name is not one."""
+    if not BACKUP_RE.match(name or ""):
+        return None
+    path = os.path.join(_backups_dir(), name)
+    return path if os.path.isfile(path) else None
+
+
+def restore_backup(name):
+    """Replace the live data with a backup. The current state is saved first
+    (…_predi-vazstanovyavane.db), so a restore can itself be undone."""
+    path = backup_path(name)
+    if path is None:
+        raise NotFound("Резервното копие не е намерено")
+    # Refuse files that are not a database of this program.
+    probe = sqlite3.connect(path)
+    try:
+        ok = probe.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='apartments'"
+        ).fetchone()[0]
+    except sqlite3.DatabaseError:
+        ok = 0
+    finally:
+        probe.close()
+    if not ok:
+        raise ValueError("Файлът не е валидна база на ЕС Мениджър")
+    safety = backup_now(keep=10**6, tag="predi-vazstanovyavane")
+    _copy_database(path, DB_PATH)
+    init_db()   # bring an older backup up to the current schema
+    audit("database", None, "RESTORE", new_value=f"от {name}; предишно състояние: {safety}")
+    return safety
+
+
+def backup_db(keep=30):
+    """Daily automatic copy: backups/etazna_YYYY-MM-DD.db (one per day)."""
+    if not os.path.exists(DB_PATH):
+        return None
     target = os.path.join(
-        backups_dir, f"etazna_{datetime.now().strftime('%Y-%m-%d')}.db"
+        _backups_dir(), f"etazna_{datetime.now().strftime('%Y-%m-%d')}.db"
     )
     if not os.path.exists(target):
-        shutil.copy2(DB_PATH, target)
-        old = sorted(
-            f for f in os.listdir(backups_dir)
-            if f.startswith("etazna_") and f.endswith(".db")
-        )
-        for f in old[:-keep]:
-            try:
-                os.remove(os.path.join(backups_dir, f))
-            except OSError:
-                pass
+        _copy_database(DB_PATH, target)
+        _prune_backups(keep)
     return target
+
+
+# ── Audit ────────────────────────────────────────────────────
+# The log is kept forever, also after a person is deleted — so it must not
+# hold their ЕГН. Everything written here goes through _scrub().
+_EGN_IN_TEXT = re.compile(r"('egn':\s*)'[^']*'")
+
+
+def _scrub(value):
+    if isinstance(value, dict):
+        value = dict(value)
+        if value.get("egn"):
+            value["egn"] = "***"
+    return value
 
 
 def audit(table_name, record_id, action, old_value=None, new_value=None, changed_by="admin", conn=None):
@@ -296,8 +451,9 @@ def audit(table_name, record_id, action, old_value=None, new_value=None, changed
         conn = get_connection()
     conn.execute(
         "INSERT INTO audit_log (table_name, record_id, action, old_value, new_value, changed_by) VALUES (?,?,?,?,?,?)",
-        (table_name, record_id, action, str(old_value) if old_value else None,
-         str(new_value) if new_value else None, changed_by)
+        (table_name, record_id, action,
+         str(_scrub(old_value)) if old_value else None,
+         str(_scrub(new_value)) if new_value else None, changed_by)
     )
     if own:
         conn.commit()
