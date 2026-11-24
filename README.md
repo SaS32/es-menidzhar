@@ -1,4 +1,4 @@
-# ЕС Мениджър — Web версия v2.5.1
+# ЕС Мениджър — Web версия v2.5.2
 
 *Bulgarian condominium (етажна собственост) management — a local-first web app.*
 
@@ -25,7 +25,7 @@ is never uploaded anywhere. Licensed under the [MIT License](LICENSE).
 
 ### Вариант А — готов `.exe` (не изисква Python)
 
-1. Изтеглете `ES_Menidzhar_v2.5.1.exe` от [Releases](https://github.com/SaS32/es-menidzhar/releases)
+1. Изтеглете `ES_Menidzhar_v2.5.2.exe` от [Releases](https://github.com/SaS32/es-menidzhar/releases)
    и го копирайте в удобна папка, напр. `C:\ES_Menidzhar\`
    *(файлът не е подписан — Windows ще предупреди веднъж; вижте
    [За `.exe` файла](#за-exe-файла--какво-да-очаквате))*
@@ -240,7 +240,7 @@ Windows SmartScreen показва син прозорец:
 Всяко издание носи контролна сума. Сравнете я, преди да пуснете файла:
 
 ```powershell
-Get-FileHash ES_Menidzhar_v2.5.1.exe -Algorithm SHA256
+Get-FileHash ES_Menidzhar_v2.5.2.exe -Algorithm SHA256
 ```
 
 Резултатът трябва да съвпада със сумата в страницата на изданието
