@@ -66,4 +66,6 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    # Regenerate with: python tools/make_icon.py
+    icon=os.path.join("static", "icon.ico"),
 )
